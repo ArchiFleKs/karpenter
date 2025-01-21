@@ -17,15 +17,15 @@ package integration_test
 import (
 	"strconv"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	"sigs.k8s.io/karpenter/pkg/test"
 )
@@ -42,7 +42,7 @@ var _ = Describe("CNITests", func() {
 		Expect(allocatablePods).To(Equal(eniLimitedPodsFor(node.Labels["node.kubernetes.io/instance-type"])))
 	})
 	It("should set max pods to 110 if maxPods is set in kubelet", func() {
-		nodePool.Spec.Template.Spec.Kubelet = &v1beta1.KubeletConfiguration{MaxPods: lo.ToPtr[int32](110)}
+		nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{MaxPods: lo.ToPtr[int32](110)}
 		pod := test.Pod()
 		env.ExpectCreated(pod, nodeClass, nodePool)
 		env.EventuallyExpectHealthy(pod)
@@ -67,17 +67,17 @@ var _ = Describe("CNITests", func() {
 })
 
 func eniLimitedPodsFor(instanceType string) int64 {
-	instance, err := env.EC2API.DescribeInstanceTypes(&ec2.DescribeInstanceTypesInput{
-		InstanceTypes: aws.StringSlice([]string{instanceType}),
+	instance, err := env.EC2API.DescribeInstanceTypes(env.Context, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []ec2types.InstanceType{ec2types.InstanceType(instanceType)},
 	})
 	Expect(err).ToNot(HaveOccurred())
 	networkInfo := *instance.InstanceTypes[0].NetworkInfo
-	return *networkInfo.MaximumNetworkInterfaces*(*networkInfo.Ipv4AddressesPerInterface-1) + 2
+	return int64(*networkInfo.MaximumNetworkInterfaces*(*networkInfo.Ipv4AddressesPerInterface-1) + 2)
 }
 
 func reservedENIsFor(instanceType string) int64 {
-	instance, err := env.EC2API.DescribeInstanceTypes(&ec2.DescribeInstanceTypesInput{
-		InstanceTypes: aws.StringSlice([]string{instanceType}),
+	instance, err := env.EC2API.DescribeInstanceTypes(env.Context, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []ec2types.InstanceType{ec2types.InstanceType(instanceType)},
 	})
 	Expect(err).ToNot(HaveOccurred())
 	networkInfo := *instance.InstanceTypes[0].NetworkInfo
@@ -87,5 +87,5 @@ func reservedENIsFor(instanceType string) int64 {
 		reservedENIs, err = strconv.Atoi(reservedENIsVar.Value)
 		Expect(err).ToNot(HaveOccurred())
 	}
-	return (*networkInfo.MaximumNetworkInterfaces-int64(reservedENIs))*(*networkInfo.Ipv4AddressesPerInterface-1) + 2
+	return int64((int(*networkInfo.MaximumNetworkInterfaces)-reservedENIs)*(int(*networkInfo.Ipv4AddressesPerInterface-1)) + 2)
 }

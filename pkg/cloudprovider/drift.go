@@ -19,13 +19,13 @@ import (
 	"fmt"
 
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instance"
 	"github.com/aws/karpenter-provider-aws/pkg/utils"
@@ -38,7 +38,7 @@ const (
 	NodeClassDrift     cloudprovider.DriftReason = "NodeClassDrift"
 )
 
-func (c *CloudProvider) isNodeClassDrifted(ctx context.Context, nodeClaim *corev1beta1.NodeClaim, nodePool *corev1beta1.NodePool, nodeClass *v1beta1.EC2NodeClass) (cloudprovider.DriftReason, error) {
+func (c *CloudProvider) isNodeClassDrifted(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodePool *karpv1.NodePool, nodeClass *v1.EC2NodeClass) (cloudprovider.DriftReason, error) {
 	// First check if the node class is statically drifted to save on API calls.
 	if drifted := c.areStaticFieldsDrifted(nodeClaim, nodeClass); drifted != "" {
 		return drifted, nil
@@ -65,54 +65,52 @@ func (c *CloudProvider) isNodeClassDrifted(ctx context.Context, nodeClaim *corev
 	return drifted, nil
 }
 
-func (c *CloudProvider) isAMIDrifted(ctx context.Context, nodeClaim *corev1beta1.NodeClaim, nodePool *corev1beta1.NodePool,
-	instance *instance.Instance, nodeClass *v1beta1.EC2NodeClass) (cloudprovider.DriftReason, error) {
+func (c *CloudProvider) isAMIDrifted(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodePool *karpv1.NodePool,
+	instance *instance.Instance, nodeClass *v1.EC2NodeClass) (cloudprovider.DriftReason, error) {
 	instanceTypes, err := c.GetInstanceTypes(ctx, nodePool)
 	if err != nil {
 		return "", fmt.Errorf("getting instanceTypes, %w", err)
 	}
 	nodeInstanceType, found := lo.Find(instanceTypes, func(instType *cloudprovider.InstanceType) bool {
-		return instType.Name == nodeClaim.Labels[v1.LabelInstanceTypeStable]
+		return instType.Name == nodeClaim.Labels[corev1.LabelInstanceTypeStable]
 	})
 	if !found {
-		return "", fmt.Errorf(`finding node instance type "%s"`, nodeClaim.Labels[v1.LabelInstanceTypeStable])
+		return "", fmt.Errorf(`finding node instance type "%s"`, nodeClaim.Labels[corev1.LabelInstanceTypeStable])
 	}
-	amis, err := c.amiProvider.Get(ctx, nodeClass, &amifamily.Options{})
-	if err != nil {
-		return "", fmt.Errorf("getting amis, %w", err)
-	}
-	if len(amis) == 0 {
+	if len(nodeClass.Status.AMIs) == 0 {
 		return "", fmt.Errorf("no amis exist given constraints")
 	}
-	mappedAMIs := amis.MapToInstanceTypes([]*cloudprovider.InstanceType{nodeInstanceType})
+	mappedAMIs := amifamily.MapToInstanceTypes([]*cloudprovider.InstanceType{nodeInstanceType}, nodeClass.Status.AMIs)
 	if !lo.Contains(lo.Keys(mappedAMIs), instance.ImageID) {
 		return AMIDrift, nil
 	}
 	return "", nil
 }
 
-// Checks if the security groups are drifted, by comparing the EC2NodeClass.Status.Subnets
+// Checks if the security groups are drifted, by comparing the subnet returned from the subnetProvider
 // to the ec2 instance subnets
-func (c *CloudProvider) isSubnetDrifted(instance *instance.Instance, nodeClass *v1beta1.EC2NodeClass) (cloudprovider.DriftReason, error) {
-	// If the node template status does not have subnets, wait for the subnets to be populated before continuing
+func (c *CloudProvider) isSubnetDrifted(instance *instance.Instance, nodeClass *v1.EC2NodeClass) (cloudprovider.DriftReason, error) {
+	// subnets need to be found to check for drift
 	if len(nodeClass.Status.Subnets) == 0 {
-		return "", fmt.Errorf("no subnets exist in status")
+		return "", fmt.Errorf("no subnets are discovered")
 	}
-	_, found := lo.Find(nodeClass.Status.Subnets, func(subnet v1beta1.Subnet) bool {
+
+	_, found := lo.Find(nodeClass.Status.Subnets, func(subnet v1.Subnet) bool {
 		return subnet.ID == instance.SubnetID
 	})
+
 	if !found {
 		return SubnetDrift, nil
 	}
 	return "", nil
 }
 
-// Checks if the security groups are drifted, by comparing the EC2NodeClass.Status.SecurityGroups
+// Checks if the security groups are drifted, by comparing the security groups returned from the SecurityGroupProvider
 // to the ec2 instance security groups
-func (c *CloudProvider) areSecurityGroupsDrifted(ec2Instance *instance.Instance, nodeClass *v1beta1.EC2NodeClass) (cloudprovider.DriftReason, error) {
-	securityGroupIds := sets.New(lo.Map(nodeClass.Status.SecurityGroups, func(sg v1beta1.SecurityGroup, _ int) string { return sg.ID })...)
+func (c *CloudProvider) areSecurityGroupsDrifted(ec2Instance *instance.Instance, nodeClass *v1.EC2NodeClass) (cloudprovider.DriftReason, error) {
+	securityGroupIds := sets.New(lo.Map(nodeClass.Status.SecurityGroups, func(sg v1.SecurityGroup, _ int) string { return sg.ID })...)
 	if len(securityGroupIds) == 0 {
-		return "", fmt.Errorf("no security groups exist in status")
+		return "", fmt.Errorf("no security groups are present in the status")
 	}
 
 	if !securityGroupIds.Equal(sets.New(ec2Instance.SecurityGroupIDs...)) {
@@ -121,10 +119,17 @@ func (c *CloudProvider) areSecurityGroupsDrifted(ec2Instance *instance.Instance,
 	return "", nil
 }
 
-func (c *CloudProvider) areStaticFieldsDrifted(nodeClaim *corev1beta1.NodeClaim, nodeClass *v1beta1.EC2NodeClass) cloudprovider.DriftReason {
-	nodeClassHash, foundHashNodeClass := nodeClass.Annotations[v1beta1.AnnotationEC2NodeClassHash]
-	nodeClaimHash, foundHashNodeClaim := nodeClaim.Annotations[v1beta1.AnnotationEC2NodeClassHash]
-	if !foundHashNodeClass || !foundHashNodeClaim {
+func (c *CloudProvider) areStaticFieldsDrifted(nodeClaim *karpv1.NodeClaim, nodeClass *v1.EC2NodeClass) cloudprovider.DriftReason {
+	nodeClassHash, foundNodeClassHash := nodeClass.Annotations[v1.AnnotationEC2NodeClassHash]
+	nodeClassHashVersion, foundNodeClassHashVersion := nodeClass.Annotations[v1.AnnotationEC2NodeClassHashVersion]
+	nodeClaimHash, foundNodeClaimHash := nodeClaim.Annotations[v1.AnnotationEC2NodeClassHash]
+	nodeClaimHashVersion, foundNodeClaimHashVersion := nodeClaim.Annotations[v1.AnnotationEC2NodeClassHashVersion]
+
+	if !foundNodeClassHash || !foundNodeClaimHash || !foundNodeClassHashVersion || !foundNodeClaimHashVersion {
+		return ""
+	}
+	// validate that the hash version for the EC2NodeClass is the same as the NodeClaim before evaluating for static drift
+	if nodeClassHashVersion != nodeClaimHashVersion {
 		return ""
 	}
 	return lo.Ternary(nodeClassHash != nodeClaimHash, NodeClassDrift, "")

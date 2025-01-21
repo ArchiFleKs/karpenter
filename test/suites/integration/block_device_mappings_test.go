@@ -15,11 +15,13 @@ limitations under the License.
 package integration_test
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/samber/lo"
 	"sigs.k8s.io/karpenter/pkg/test"
 	"sigs.k8s.io/karpenter/pkg/utils/resources"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -27,11 +29,11 @@ import (
 
 var _ = Describe("BlockDeviceMappings", func() {
 	It("should use specified block device mappings", func() {
-		nodeClass.Spec.BlockDeviceMappings = []*v1beta1.BlockDeviceMapping{
+		nodeClass.Spec.BlockDeviceMappings = []*v1.BlockDeviceMapping{
 			{
 				DeviceName: aws.String("/dev/xvda"),
-				EBS: &v1beta1.BlockDevice{
-					VolumeSize:          resources.Quantity("10G"),
+				EBS: &v1.BlockDevice{
+					VolumeSize:          resources.Quantity("20Gi"),
 					VolumeType:          aws.String("io2"),
 					IOPS:                aws.Int64(1000),
 					Encrypted:           aws.Bool(true),
@@ -49,10 +51,10 @@ var _ = Describe("BlockDeviceMappings", func() {
 		Expect(instance.BlockDeviceMappings[0]).ToNot(BeNil())
 		Expect(instance.BlockDeviceMappings[0]).To(HaveField("DeviceName", HaveValue(Equal("/dev/xvda"))))
 		Expect(instance.BlockDeviceMappings[0].Ebs).To(HaveField("DeleteOnTermination", HaveValue(BeTrue())))
-		volume := env.GetVolume(instance.BlockDeviceMappings[0].Ebs.VolumeId)
+		volume := env.GetVolume(lo.FromPtr(instance.BlockDeviceMappings[0].Ebs.VolumeId))
 		Expect(volume).To(HaveField("Encrypted", HaveValue(BeTrue())))
-		Expect(volume).To(HaveField("Size", HaveValue(Equal(int64(10))))) // Convert G -> Gib (rounded up)
-		Expect(volume).To(HaveField("Iops", HaveValue(Equal(int64(1000)))))
-		Expect(volume).To(HaveField("VolumeType", HaveValue(Equal("io2"))))
+		Expect(volume).To(HaveField("Size", HaveValue(Equal(int32(20)))))
+		Expect(volume).To(HaveField("Iops", HaveValue(Equal(int32(1000)))))
+		Expect(volume).To(HaveField("VolumeType", HaveValue(Equal(ec2types.VolumeType("io2")))))
 	})
 })

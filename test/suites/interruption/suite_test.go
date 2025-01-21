@@ -20,16 +20,16 @@ import (
 	"time"
 
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"knative.dev/pkg/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/messages"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/interruption/messages/scheduledchange"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
@@ -42,8 +42,8 @@ import (
 )
 
 var env *aws.Environment
-var nodeClass *v1beta1.EC2NodeClass
-var nodePool *corev1beta1.NodePool
+var nodeClass *v1.EC2NodeClass
+var nodePool *karpv1.NodePool
 
 func TestInterruption(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -67,14 +67,15 @@ var _ = BeforeEach(func() {
 var _ = AfterEach(func() { env.Cleanup() })
 var _ = AfterEach(func() { env.AfterEach() })
 
-var _ = Describe("Interruption", Label("AWS"), func() {
+var _ = Describe("Interruption", func() {
 	It("should terminate the spot instance and spin-up a new node on spot interruption warning", func() {
 		By("Creating a single healthy node with a healthy deployment")
-		nodePool = coretest.ReplaceRequirements(nodePool, v1.NodeSelectorRequirement{
-			Key:      corev1beta1.CapacityTypeLabelKey,
-			Operator: v1.NodeSelectorOpIn,
-			Values:   []string{corev1beta1.CapacityTypeSpot},
-		})
+		nodePool = coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
+			NodeSelectorRequirement: corev1.NodeSelectorRequirement{
+				Key:      karpv1.CapacityTypeLabelKey,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{karpv1.CapacityTypeSpot},
+			}})
 		numPods := 1
 		dep := coretest.Deployment(coretest.DeploymentOptions{
 			Replicas: int32(numPods),
@@ -82,7 +83,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "my-app"},
 				},
-				TerminationGracePeriodSeconds: ptr.Int64(0),
+				TerminationGracePeriodSeconds: lo.ToPtr(int64(0)),
 			},
 		})
 		selector := labels.SelectorFromSet(dep.Spec.Selector.MatchLabels)
@@ -104,7 +105,11 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 
 		// We are expecting the node to be terminated before the termination is complete
 		By("waiting to receive the interruption and terminate the node")
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Second * 110).Should(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(env.Client.Get(env.Context, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			g.Expect(!node.DeletionTimestamp.IsZero()).To(BeTrue())
+		}).WithTimeout(time.Minute).Should(Succeed())
+		env.EventuallyExpectNotFound(node)
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node at the API server when the EC2 instance is stopped", func() {
@@ -116,7 +121,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "my-app"},
 				},
-				TerminationGracePeriodSeconds: ptr.Int64(0),
+				TerminationGracePeriodSeconds: lo.ToPtr(int64(0)),
 			},
 		})
 		selector := labels.SelectorFromSet(dep.Spec.Selector.MatchLabels)
@@ -129,8 +134,13 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 		node := env.Monitor.CreatedNodes()[0]
 
 		By("Stopping the EC2 instance without the EKS cluster's knowledge")
-		env.ExpectInstanceStopped(node.Name)                                                   // Make a call to the EC2 api to stop the instance
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
+		env.ExpectInstanceStopped(node.Name) // Make a call to the EC2 api to stop the instance
+
+		Eventually(func(g Gomega) {
+			g.Expect(env.Client.Get(env.Context, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			g.Expect(!node.DeletionTimestamp.IsZero()).To(BeTrue())
+		}).WithTimeout(time.Minute).Should(Succeed())
+		env.EventuallyExpectNotFound(node)
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node at the API server when the EC2 instance is terminated", func() {
@@ -142,7 +152,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "my-app"},
 				},
-				TerminationGracePeriodSeconds: ptr.Int64(0),
+				TerminationGracePeriodSeconds: lo.ToPtr(int64(0)),
 			},
 		})
 		selector := labels.SelectorFromSet(dep.Spec.Selector.MatchLabels)
@@ -155,8 +165,13 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 		node := env.Monitor.CreatedNodes()[0]
 
 		By("Terminating the EC2 instance without the EKS cluster's knowledge")
-		env.ExpectInstanceTerminated(node.Name)                                                // Make a call to the EC2 api to stop the instance
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
+		env.ExpectInstanceTerminated(node.Name) // Make a call to the EC2 api to stop the instance
+
+		Eventually(func(g Gomega) {
+			g.Expect(env.Client.Get(env.Context, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			g.Expect(!node.DeletionTimestamp.IsZero()).To(BeTrue())
+		}).WithTimeout(time.Minute).Should(Succeed())
+		env.EventuallyExpectNotFound(node)
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 	It("should terminate the node when receiving a scheduled change health event", func() {
@@ -168,7 +183,7 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "my-app"},
 				},
-				TerminationGracePeriodSeconds: ptr.Int64(0),
+				TerminationGracePeriodSeconds: lo.ToPtr(int64(0)),
 			},
 		})
 		selector := labels.SelectorFromSet(dep.Spec.Selector.MatchLabels)
@@ -184,7 +199,12 @@ var _ = Describe("Interruption", Label("AWS"), func() {
 
 		By("Creating a scheduled change health event in the SQS message queue")
 		env.ExpectMessagesCreated(scheduledChangeMessage(env.Region, "000000000000", instanceID))
-		env.EventuallyExpectNotFoundAssertion(node).WithTimeout(time.Minute).Should(Succeed()) // shorten the timeout since we should react faster
+
+		Eventually(func(g Gomega) {
+			g.Expect(env.Client.Get(env.Context, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			g.Expect(!node.DeletionTimestamp.IsZero()).To(BeTrue())
+		}).WithTimeout(time.Minute).Should(Succeed())
+		env.EventuallyExpectNotFound(node)
 		env.EventuallyExpectHealthyPodCount(selector, 1)
 	})
 })

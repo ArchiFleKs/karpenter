@@ -13,7 +13,7 @@ The finalizer blocks deletion of the node object while the Termination Controlle
 
 ### Disruption Controller
 
-Karpenter automatically discovers disruptable nodes and spins up replacements when needed. Karpenter disrupts nodes by executing one [automatic method](#automatic-methods) at a time, in order of Expiration, Drift, and then Consolidation. Each method varies slightly, but they all follow the standard disruption process:
+Karpenter automatically discovers disruptable nodes and spins up replacements when needed. Karpenter disrupts nodes by executing one [automated method](#automated-methods) at a time, in order of Expiration, Drift, and then Consolidation. Each method varies slightly, but they all follow the standard disruption process:
 1. Identify a list of prioritized candidates for the disruption method.
    * If there are [pods that cannot be evicted](#pod-eviction) on the node, Karpenter will ignore the node and try disrupting it later.
    * If there are no disruptable nodes, continue to the next disruption method.
@@ -26,9 +26,9 @@ Karpenter automatically discovers disruptable nodes and spins up replacements wh
 
 ### Termination Controller
 
-When a Karpenter node is deleted, the Karpenter finalizer will block deletion and the APIServer will set the `DeletionTimestamp` on the node, allowing Karpenter to gracefully shutdown the node, modeled after [Kubernetes Graceful Node Shutdown](https://kubernetes.io/docs/concepts/architecture/nodes/#graceful-node-shutdown). Karpenter's graceful shutdown process will:
+When a Karpenter node is deleted, the Karpenter finalizer will block deletion and the APIServer will set the `DeletionTimestamp` on the node, allowing Karpenter to gracefully shutdown the node, modeled after [Kubernetes Graceful Node Shutdown](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#graceful-node-shutdown). Karpenter's graceful shutdown process will:
 1. Add the `karpenter.sh/disruption:NoSchedule` taint to the node to prevent pods from scheduling to it.
-2. Begin evicting the pods on the node with the [Kubernetes Eviction API](https://kubernetes.io/docs/concepts/scheduling-eviction/api-eviction/) to respect PDBs, while ignoring all non-daemonset pods and [static pods](https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/). Wait for the node to be fully drained before proceeding to Step (3).
+2. Begin evicting the pods on the node with the [Kubernetes Eviction API](https://kubernetes.io/docs/concepts/scheduling-eviction/api-eviction/) to respect PDBs, while ignoring all daemonset pods and [static pods](https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/). Wait for the node to be fully drained before proceeding to Step (3).
    * While waiting, if the underlying NodeClaim for the node no longer exists, remove the finalizer to allow the APIServer to delete the node, completing termination.
 3. Terminate the NodeClaim in the Cloud Provider.
 4. Remove the finalizer from the node to allow the APIServer to delete the node, completing termination.
@@ -126,25 +126,24 @@ In special cases, drift can correspond to multiple values and must be handled di
 ##### NodePool
 | Fields         |
 |----------------|
-| Requirements   |
+| spec.template.spec.requirements   |
 
 ##### EC2NodeClass
 | Fields                        |
 |-------------------------------|
-| Subnet Selector Terms         |
-| Security Group Selector Terms |
-| AMI Selector Terms            |
+| spec.subnetSelectorTerms      |
+| spec.securityGroupSelectorTerms  |
+| spec.amiSelectorTerms  |
 
 #### Behavioral Fields
 Behavioral Fields are treated as over-arching settings on the NodePool to dictate how Karpenter behaves. These fields don’t correspond to settings on the NodeClaim or instance. They’re set by the user to control Karpenter’s Provisioning and disruption logic. Since these don’t map to a desired state of NodeClaims, __behavioral fields are not considered for Drift__.
 
-__Behavioral Fields__
-- Weight                      
-- Limits                      
-- ConsolidationPolicy               
-- ConsolidateAfter      
-- ExpireAfter  
----      
+##### NodePool
+| Fields         |
+|----------------|
+| spec.weight         |
+| spec.limits         |
+| spec.disruption.*   |
 
 Read the [Drift Design](https://github.com/aws/karpenter-core/blob/main/designs/drift.md) for more.
 
@@ -168,12 +167,14 @@ When Karpenter detects one of these events will occur to your nodes, it automati
 For Spot interruptions, the NodePool will start a new node as soon as it sees the Spot interruption warning. Spot interruptions have a __2 minute notice__ before Amazon EC2 reclaims the instance. Karpenter's average node startup time means that, generally, there is sufficient time for the new node to become ready and to move the pods to the new node before the NodeClaim is reclaimed.
 
 {{% alert title="Note" color="primary" %}}
-Karpenter publishes Kubernetes events to the node for all events listed above in addition to __Spot Rebalance Recommendations__. Karpenter does not currently support taint, drain, and terminate logic for Spot Rebalance Recommendations.
+Karpenter publishes Kubernetes events to the node for all events listed above in addition to [__Spot Rebalance Recommendations__](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/rebalance-recommendations.html). Karpenter does not currently support taint, drain, and terminate logic for Spot Rebalance Recommendations.
+
+If you require handling for Spot Rebalance Recommendations, you can use the [AWS Node Termination Handler (NTH)](https://github.com/aws/aws-node-termination-handler) alongside Karpenter; however, note that the AWS Node Termination Handler cordons and drains nodes on rebalance recommendations, potentially causing more node churn in the cluster than with interruptions alone. Further information can be found in the [Troubleshooting Guide]({{< ref "../troubleshooting#aws-node-termination-handler-nth-interactions" >}}).
 {{% /alert %}}
 
 Karpenter enables this feature by watching an SQS queue which receives critical events from AWS services which may affect your nodes. Karpenter requires that an SQS queue be provisioned and EventBridge rules and targets be added that forward interruption events from AWS services to the SQS queue. Karpenter provides details for provisioning this infrastructure in the [CloudFormation template in the Getting Started Guide](../../getting-started/getting-started-with-karpenter/#create-the-karpenter-infrastructure-and-iam-roles).
 
-To enable interruption handling, configure the `--interruption-queue-name` CLI argument with the name of the interruption queue provisioned to handle interruption events.
+To enable interruption handling, configure the `--interruption-queue` CLI argument with the name of the interruption queue provisioned to handle interruption events.
 
 ## Controls
 
@@ -208,7 +209,7 @@ Voluntary node removal does not include [Interruption]({{<ref "#interruption" >}
 
 ### Node-Level Controls
 
-Nodes can be opted out of consolidation disruption by setting the annotation `karpenter.sh/do-not-disrupt: "true"` on the node.
+You can block Karpenter from voluntarily choosing to disrupt certain nodes by setting the `karpenter.sh/do-not-disrupt: "true"` annotation on the node. This will prevent disruption actions on the node.
 
 ```yaml
 apiVersion: v1
@@ -220,7 +221,7 @@ metadata:
 
 #### Example: Disable Disruption on a NodePool
 
-NodePool `.spec.annotations` allow you to set annotations that will be applied to all nodes launched by this NodePool. By setting the annotation `karpenter.sh/do-not-disrupt: "true"` on the NodePool, you will selectively prevent all nodes launched by this NodePool from being considered in consolidation calculations.
+NodePool `.spec.annotations` allow you to set annotations that will be applied to all nodes launched by this NodePool. By setting the annotation `karpenter.sh/do-not-disrupt: "true"` on the NodePool, you will selectively prevent all nodes launched by this NodePool from being considered in disruption actions.
 
 ```yaml
 apiVersion: karpenter.sh/v1beta1

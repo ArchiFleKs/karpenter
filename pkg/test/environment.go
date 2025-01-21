@@ -17,16 +17,16 @@ package test
 import (
 	"context"
 	"net"
+	"time"
 
 	"github.com/patrickmn/go-cache"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
-	"knative.dev/pkg/ptr"
+	clock "k8s.io/utils/clock/testing"
 
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
-	"sigs.k8s.io/karpenter/pkg/operator/scheme"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	awscache "github.com/aws/karpenter-provider-aws/pkg/cache"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
@@ -36,6 +36,7 @@ import (
 	"github.com/aws/karpenter-provider-aws/pkg/providers/launchtemplate"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/pricing"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/securitygroup"
+	ssmp "github.com/aws/karpenter-provider-aws/pkg/providers/ssm"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/subnet"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/version"
 
@@ -45,105 +46,132 @@ import (
 )
 
 func init() {
-	lo.Must0(apis.AddToScheme(scheme.Scheme))
-	corev1beta1.NormalizedLabels = lo.Assign(corev1beta1.NormalizedLabels, map[string]string{"topology.ebs.csi.aws.com/zone": corev1.LabelTopologyZone})
+	karpv1.NormalizedLabels = lo.Assign(karpv1.NormalizedLabels, map[string]string{"topology.ebs.csi.aws.com/zone": corev1.LabelTopologyZone})
+	coretest.SetDefaultNodeClassType(&v1.EC2NodeClass{})
 }
 
 type Environment struct {
+	// Mock
+	Clock *clock.FakeClock
+
 	// API
 	EC2API     *fake.EC2API
+	EKSAPI     *fake.EKSAPI
 	SSMAPI     *fake.SSMAPI
 	IAMAPI     *fake.IAMAPI
 	PricingAPI *fake.PricingAPI
 
 	// Cache
-	EC2Cache                  *cache.Cache
-	KubernetesVersionCache    *cache.Cache
-	InstanceTypeCache         *cache.Cache
-	UnavailableOfferingsCache *awscache.UnavailableOfferings
-	LaunchTemplateCache       *cache.Cache
-	SubnetCache               *cache.Cache
-	SecurityGroupCache        *cache.Cache
-	InstanceProfileCache      *cache.Cache
+	EC2Cache                      *cache.Cache
+	InstanceTypeCache             *cache.Cache
+	UnavailableOfferingsCache     *awscache.UnavailableOfferings
+	LaunchTemplateCache           *cache.Cache
+	SubnetCache                   *cache.Cache
+	AvailableIPAdressCache        *cache.Cache
+	AssociatePublicIPAddressCache *cache.Cache
+	SecurityGroupCache            *cache.Cache
+	InstanceProfileCache          *cache.Cache
+	SSMCache                      *cache.Cache
+	DiscoveredCapacityCache       *cache.Cache
 
 	// Providers
-	InstanceTypesProvider   *instancetype.Provider
-	InstanceProvider        *instance.Provider
-	SubnetProvider          *subnet.Provider
-	SecurityGroupProvider   *securitygroup.Provider
-	InstanceProfileProvider *instanceprofile.Provider
-	PricingProvider         *pricing.Provider
-	AMIProvider             *amifamily.Provider
-	AMIResolver             *amifamily.Resolver
-	VersionProvider         *version.Provider
-	LaunchTemplateProvider  *launchtemplate.Provider
+	InstanceTypesResolver   *instancetype.DefaultResolver
+	InstanceTypesProvider   *instancetype.DefaultProvider
+	InstanceProvider        *instance.DefaultProvider
+	SubnetProvider          *subnet.DefaultProvider
+	SecurityGroupProvider   *securitygroup.DefaultProvider
+	InstanceProfileProvider *instanceprofile.DefaultProvider
+	PricingProvider         *pricing.DefaultProvider
+	AMIProvider             *amifamily.DefaultProvider
+	AMIResolver             *amifamily.DefaultResolver
+	VersionProvider         *version.DefaultProvider
+	LaunchTemplateProvider  *launchtemplate.DefaultProvider
 }
 
 func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment {
+	// Mock
+	clock := &clock.FakeClock{}
+
 	// API
 	ec2api := fake.NewEC2API()
+	eksapi := fake.NewEKSAPI()
 	ssmapi := fake.NewSSMAPI()
 	iamapi := fake.NewIAMAPI()
 
 	// cache
 	ec2Cache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
-	kubernetesVersionCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	instanceTypeCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
+	discoveredCapacityCache := cache.New(awscache.DiscoveredCapacityCacheTTL, awscache.DefaultCleanupInterval)
 	unavailableOfferingsCache := awscache.NewUnavailableOfferings()
 	launchTemplateCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	subnetCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
+	availableIPAdressCache := cache.New(awscache.AvailableIPAddressTTL, awscache.DefaultCleanupInterval)
+	associatePublicIPAddressCache := cache.New(awscache.AssociatePublicIPAddressTTL, awscache.DefaultCleanupInterval)
 	securityGroupCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	instanceProfileCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
+	ssmCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	fakePricingAPI := &fake.PricingAPI{}
 
 	// Providers
-	pricingProvider := pricing.NewProvider(ctx, fakePricingAPI, ec2api, fake.DefaultRegion)
-	subnetProvider := subnet.NewProvider(ec2api, subnetCache)
-	securityGroupProvider := securitygroup.NewProvider(ec2api, securityGroupCache)
-	versionProvider := version.NewProvider(env.KubernetesInterface, kubernetesVersionCache)
-	instanceProfileProvider := instanceprofile.NewProvider(fake.DefaultRegion, iamapi, instanceProfileCache)
-	amiProvider := amifamily.NewProvider(versionProvider, ssmapi, ec2api, ec2Cache)
-	amiResolver := amifamily.New(amiProvider)
-	instanceTypesProvider := instancetype.NewProvider(fake.DefaultRegion, instanceTypeCache, ec2api, subnetProvider, unavailableOfferingsCache, pricingProvider)
+	pricingProvider := pricing.NewDefaultProvider(ctx, fakePricingAPI, ec2api, fake.DefaultRegion)
+	subnetProvider := subnet.NewDefaultProvider(ec2api, subnetCache, availableIPAdressCache, associatePublicIPAddressCache)
+	securityGroupProvider := securitygroup.NewDefaultProvider(ec2api, securityGroupCache)
+	versionProvider := version.NewDefaultProvider(env.KubernetesInterface, eksapi)
+	// Ensure we're able to hydrate the version before starting any reliant controllers.
+	// Version updates are hydrated asynchronously after this, in the event of a failure
+	// the previously resolved value will be used.
+	lo.Must0(versionProvider.UpdateVersion(ctx))
+	instanceProfileProvider := instanceprofile.NewDefaultProvider(fake.DefaultRegion, iamapi, instanceProfileCache)
+	ssmProvider := ssmp.NewDefaultProvider(ssmapi, ssmCache)
+	amiProvider := amifamily.NewDefaultProvider(clock, versionProvider, ssmProvider, ec2api, ec2Cache)
+	amiResolver := amifamily.NewDefaultResolver()
+	instanceTypesResolver := instancetype.NewDefaultResolver(fake.DefaultRegion, pricingProvider, unavailableOfferingsCache)
+	instanceTypesProvider := instancetype.NewDefaultProvider(instanceTypeCache, discoveredCapacityCache, ec2api, subnetProvider, instanceTypesResolver)
 	launchTemplateProvider :=
-		launchtemplate.NewProvider(
+		launchtemplate.NewDefaultProvider(
 			ctx,
 			launchTemplateCache,
 			ec2api,
+			eksapi,
 			amiResolver,
 			securityGroupProvider,
 			subnetProvider,
-			instanceProfileProvider,
-			ptr.String("ca-bundle"),
+			lo.ToPtr("ca-bundle"),
 			make(chan struct{}),
 			net.ParseIP("10.0.100.10"),
 			"https://test-cluster",
 		)
 	instanceProvider :=
-		instance.NewProvider(ctx,
+		instance.NewDefaultProvider(ctx,
 			"",
 			ec2api,
 			unavailableOfferingsCache,
-			instanceTypesProvider,
 			subnetProvider,
 			launchTemplateProvider,
 		)
 
 	return &Environment{
+		Clock: clock,
+
 		EC2API:     ec2api,
+		EKSAPI:     eksapi,
 		SSMAPI:     ssmapi,
 		IAMAPI:     iamapi,
 		PricingAPI: fakePricingAPI,
 
-		EC2Cache:                  ec2Cache,
-		KubernetesVersionCache:    kubernetesVersionCache,
-		InstanceTypeCache:         instanceTypeCache,
-		LaunchTemplateCache:       launchTemplateCache,
-		SubnetCache:               subnetCache,
-		SecurityGroupCache:        securityGroupCache,
-		InstanceProfileCache:      instanceProfileCache,
-		UnavailableOfferingsCache: unavailableOfferingsCache,
+		EC2Cache:                      ec2Cache,
+		InstanceTypeCache:             instanceTypeCache,
+		LaunchTemplateCache:           launchTemplateCache,
+		SubnetCache:                   subnetCache,
+		AvailableIPAdressCache:        availableIPAdressCache,
+		AssociatePublicIPAddressCache: associatePublicIPAddressCache,
+		SecurityGroupCache:            securityGroupCache,
+		InstanceProfileCache:          instanceProfileCache,
+		UnavailableOfferingsCache:     unavailableOfferingsCache,
+		SSMCache:                      ssmCache,
+		DiscoveredCapacityCache:       discoveredCapacityCache,
 
+		InstanceTypesResolver:   instanceTypesResolver,
 		InstanceTypesProvider:   instanceTypesProvider,
 		InstanceProvider:        instanceProvider,
 		SubnetProvider:          subnetProvider,
@@ -158,21 +186,25 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 }
 
 func (env *Environment) Reset() {
+	env.Clock.SetTime(time.Time{})
 	env.EC2API.Reset()
+	env.EKSAPI.Reset()
 	env.SSMAPI.Reset()
 	env.IAMAPI.Reset()
 	env.PricingAPI.Reset()
 	env.PricingProvider.Reset()
+	env.InstanceTypesProvider.Reset()
 
 	env.EC2Cache.Flush()
-	env.KubernetesVersionCache.Flush()
-	env.InstanceTypeCache.Flush()
 	env.UnavailableOfferingsCache.Flush()
 	env.LaunchTemplateCache.Flush()
 	env.SubnetCache.Flush()
+	env.AssociatePublicIPAddressCache.Flush()
+	env.AvailableIPAdressCache.Flush()
 	env.SecurityGroupCache.Flush()
 	env.InstanceProfileCache.Flush()
-
+	env.SSMCache.Flush()
+	env.DiscoveredCapacityCache.Flush()
 	mfs, err := crmetrics.Registry.Gather()
 	if err != nil {
 		for _, mf := range mfs {

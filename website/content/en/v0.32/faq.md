@@ -14,10 +14,10 @@ See [Configuring NodePools]({{< ref "./concepts/#configuring-nodepools" >}}) for
 AWS is the first cloud provider supported by Karpenter, although it is designed to be used with other cloud providers as well.
 
 ### Can I write my own cloud provider for Karpenter?
-Yes, but there is no documentation yet for it. Start with Karpenter's GitHub [cloudprovider](https://github.com/aws/karpenter-core/tree/v0.32.3/pkg/cloudprovider) documentation to see how the AWS provider is built, but there are other sections of the code that will require changes too.
+Yes, but there is no documentation yet for it. Start with Karpenter's GitHub [cloudprovider](https://github.com/aws/karpenter-core/tree/v0.32.10/pkg/cloudprovider) documentation to see how the AWS provider is built, but there are other sections of the code that will require changes too.
 
 ### What operating system nodes does Karpenter deploy?
-When using v1beta1 APIs, Karpenter uses the OS defined by the [AMI Family in your EC2NodeClass]({{< ref "./concepts/nodeclasses#specamifamily" >}}). 
+When using v1beta1 APIs, Karpenter uses the OS defined by the [AMI Family in your EC2NodeClass]({{< ref "./concepts/nodeclasses#specamifamily" >}}).
 Otherwise, by default, Karpenter will use Amazon Linux 2 images.
 
 ### Can I provide my own custom operating system images?
@@ -27,7 +27,7 @@ Karpenter has multiple mechanisms for configuring the [operating system]({{< ref
 Karpenter is flexible to multi-architecture configurations using [well known labels]({{< ref "./concepts/scheduling/#supported-labels">}}).
 
 ### What RBAC access is required?
-All the required RBAC rules can be found in the helm chart template. See [clusterrole-core.yaml](https://github.com/aws/karpenter/blob/v0.32.3/charts/karpenter/templates/clusterrole-core.yaml), [clusterrole.yaml](https://github.com/aws/karpenter/blob/v0.32.3/charts/karpenter/templates/clusterrole.yaml), [rolebinding.yaml](https://github.com/aws/karpenter/blob/v0.32.3/charts/karpenter/templates/rolebinding.yaml), and [role.yaml](https://github.com/aws/karpenter/blob/v0.32.3/charts/karpenter/templates/role.yaml) files for details.
+All the required RBAC rules can be found in the helm chart template. See [clusterrole-core.yaml](https://github.com/aws/karpenter/blob/v0.32.10/charts/karpenter/templates/clusterrole-core.yaml), [clusterrole.yaml](https://github.com/aws/karpenter/blob/v0.32.10/charts/karpenter/templates/clusterrole.yaml), [rolebinding.yaml](https://github.com/aws/karpenter/blob/v0.32.10/charts/karpenter/templates/rolebinding.yaml), and [role.yaml](https://github.com/aws/karpenter/blob/v0.32.10/charts/karpenter/templates/role.yaml) files for details.
 
 ### Can I run Karpenter outside of a Kubernetes cluster?
 Yes, as long as the controller has network and IAM/RBAC access to the Kubernetes API and your provider API.
@@ -105,13 +105,11 @@ The EC2 fleet API attempts to provision the instance type based on the [Price Ca
 Karpenter currently calculates the applicable daemonsets at the NodePool level with label selectors/taints, etc. It does not look to see if there are requirements on the daemonsets that would exclude it from running on particular instances that the NodePool could or couldn't launch.
 The recommendation for now is to use multiple NodePools with taints/tolerations or label selectors to limit daemonsets to only nodes launched from specific NodePoools.
 
-### What if there is no Spot capacity? Will Karpenter use On-Demand?
+### What if there is no Spot capacity?
 
 The best defense against running out of Spot capacity is to allow Karpenter to provision as many distinct instance types as possible. Even instance types that have higher specs (e.g. vCPU, memory, etc.) than what you need can still be cheaper in the Spot market than using On-Demand instances. When Spot capacity is constrained, On-Demand capacity can also be constrained since Spot is fundamentally spare On-Demand capacity.
 
-Allowing Karpenter to provision nodes from a large, diverse set of instance types will help you to stay on Spot longer and lower your costs due to Spot’s discounted pricing. Moreover, if Spot capacity becomes constrained, this diversity will also increase the chances that you’ll be able to continue to launch On-Demand capacity for your workloads.
-
-If your Karpenter NodePool specifies allows both Spot and On-Demand capacity, Karpenter will fallback to provision On-Demand capacity if there is no Spot capacity available. However, it’s strongly recommended that you allow at least 20 instance types in your NodePool since this additional diversity increases the chances that your workloads will not need to launch On-Demand capacity at all.
+Allowing Karpenter to provision nodes from a large, diverse set of instance types will help you to stay on Spot longer and lower your costs due to Spot’s discounted pricing. Moreover, if Spot capacity becomes constrained, this instance type diversity will also increase the chances that you’ll be able to continue to launch On-Demand capacity for your workloads.
 
 Karpenter has a concept of an “offering” for each instance type, which is a combination of zone and capacity type. Whenever the Fleet API returns an insufficient capacity error for Spot instances, those particular offerings are temporarily removed from consideration (across the entire NodePool) so that Karpenter can make forward progress with different options.
 
@@ -180,10 +178,10 @@ Yes, see the [KubeletConfiguration Section in the NodePool docs]({{<ref "./conce
 The difference between the Core and Full variants is that Core is a minimal OS with less components and no graphic user interface (GUI) or desktop experience.
 `Windows2019` and `Windows2022` AMI families use the Windows Server Core option for simplicity, but if required, you can specify a custom AMI to run Windows Server Full.
 
-You can specify the [Amazon EKS optimized AMI](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-windows-ami.html) with Windows Server 2022 Full for Kubernetes {{< param "latest_k8s_version" >}} by configuring an `amiSelector` that references the AMI name.
+You can specify the [Amazon EKS optimized AMI](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-windows-ami.html) with Windows Server 2022 Full for Kubernetes 1.28 by configuring an `amiSelector` that references the AMI name.
 ```yaml
 amiSelectorTerms:
-    - name: Windows_Server-2022-English-Full-EKS_Optimized-{{< param "latest_k8s_version" >}}*
+    - name: Windows_Server-2022-English-Full-EKS_Optimized-1.28*
 ```
 
 ## Deprovisioning
@@ -207,15 +205,15 @@ For information on upgrading Karpenter, see the [Upgrade Guide]({{< ref "./upgra
 
 ### How do I upgrade an EKS Cluster with Karpenter?
 
-When upgrading an Amazon EKS cluster, [Karpenter's Drift feature]({{<ref "./concepts/disruption#drift" >}}) can automatically upgrade the Karpenter-provisioned nodes to stay in-sync with the EKS control plane. Karpenter Drift currently needs to be enabled using a [feature gate]({{<ref "./reference/settings#feature-gates" >}}).
-
 {{% alert title="Note" color="primary" %}}
-Karpenter's default [EC2NodeClass `amiFamily` configuration]({{<ref "./concepts/nodeclasses#specamifamily" >}}) uses the latest EKS Optimized AL2 AMI for the same major and minor version as the EKS cluster's control plane, meaning that an upgrade of the control plane will cause Karpenter to auto-discover the new AMIs for that version.
+Karpenter recommends that you always validate AMIs in your lower environments before using them in production environments. Read [Managing AMIs]({{<ref "./tasks/managing-amis" >}}) to understand best practices about upgrading your AMIs.
 
-If using a custom AMI, you will need to trigger the rollout of this new worker node image through the publication of a new AMI with tags matching the [`amiSelector`]({{<ref "./concepts/nodeclasses#specamiselectorterms" >}}), or a change to the [`amiSelector`]({{<ref "./concepts/nodeclasses#specamiselectorterms" >}}) field.
+If using a custom AMI, you will need to trigger the rollout of new worker node images through the publication of a new AMI with tags matching the [`amiSelector`]({{<ref "./concepts/nodeclasses#specamiselectorterms" >}}), or a change to the [`amiSelector`]({{<ref "./concepts/nodeclasses#specamiselectorterms" >}}) field.
 {{% /alert %}}
 
-Start by [upgrading the EKS Cluster control plane](https://docs.aws.amazon.com/eks/latest/userguide/update-cluster.html). After the EKS Cluster upgrade completes, Karpenter's Drift feature will detect that the Karpenter-provisioned nodes are using EKS Optimized AMIs for the previous cluster version, and [automatically cordon, drain, and replace those nodes]({{<ref "./concepts/disruption#control-flow" >}}). To support pods moving to new nodes, follow Kubernetes best practices by setting appropriate pod [Resource Quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/), and using [Pod Disruption Budgets](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/) (PDB). Karpenter's Drift feature will spin up replacement nodes based on the pod resource requests, and will respect the PDBs when deprovisioning nodes.
+Karpenter's default behavior will upgrade your nodes when you've upgraded your Amazon EKS Cluster. Karpenter will [drift]({{<ref "./concepts/disruption#drift" >}}) nodes to stay in-sync with the EKS control plane version. Drift is enabled by default starting in `v0.33`. This means that as soon as your cluster is upgraded, Karpenter will auto-discover the new AMIs for that version.
+
+Start by [upgrading the EKS Cluster control plane](https://docs.aws.amazon.com/eks/latest/userguide/update-cluster.html). After the EKS Cluster upgrade completes, Karpenter will Drift and disrupt the Karpenter-provisioned nodes using EKS Optimized AMIs for the previous cluster version by first spinning up replacement nodes. Karpenter respects [Pod Disruption Budgets](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/) (PDB), and automatically [replaces, cordons, and drains those nodes]({{<ref "./concepts/disruption#control-flow" >}}). To best support pods moving to new nodes, follow Kubernetes best practices by setting appropriate pod [Resource Quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/) and using PDBs.
 
 ## Interruption Handling
 
@@ -227,7 +225,7 @@ Karpenter's native interruption handling offers two main benefits over the stand
 1. You don't have to manage and maintain a separate component to exclusively handle interruption events.
 2. Karpenter's native interruption handling coordinates with other deprovisioning so that consolidation, expiration, etc. can be aware of interruption events and vice-versa.
 
-### Why am I receiving QueueNotFound errors when I set `--interruption-queue-name`?
+### Why am I receiving QueueNotFound errors when I set `--interruption-queue`?
 Karpenter requires a queue to exist that receives event messages from EC2 and health services in order to handle interruption messages properly for nodes.
 
 Details on the types of events that Karpenter handles can be found in the [Interruption Handling Docs]({{< ref "./concepts/disruption/#interruption" >}}).

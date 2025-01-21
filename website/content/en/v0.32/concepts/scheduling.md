@@ -103,8 +103,9 @@ Refer to general [Kubernetes GPU](https://kubernetes.io/docs/tasks/manage-gpus/s
 {{% alert title="Note" color="primary" %}}
 You must enable Pod ENI support in the AWS VPC CNI Plugin before enabling Pod ENI support in Karpenter.  Please refer to the [Security Groups for Pods documentation](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) for instructions.
 {{% /alert %}}
-
-Now that Pod ENI support is enabled in the AWS VPC CNI Plugin, you can enable Pod ENI support in Karpenter by setting the `settings.aws.enablePodENI` Helm chart value to `true`.
+{{% alert title="Note" color="primary" %}}
+If you've enabled [Security Groups per Pod](https://aws.github.io/aws-eks-best-practices/networking/sgpp/), one of the instance's ENIs is reserved. To avoid discrepancies between the `maxPods` value and the node's supported pod density, you need to set [RESERVED_ENIS]({{<ref "../reference/settings" >}})=1.
+{{% /alert %}}
 
 Here is an example of a pod-eni resource defined in a deployment manifest:
 ```
@@ -173,6 +174,9 @@ requirements:
   - key: user.defined.label/type
     operator: Exists
 ```
+{{% alert title="Note" color="primary" %}}
+There is currently a limit of 30 on the total number of requirements on both the NodePool and the NodeClaim. It's important to note that `spec.template.metadata.labels` are also propagated as requirements on the NodeClaim when it's created, meaning that you can't have more than 30 requirements and labels combined set on your NodePool.
+{{% /alert %}}
 
 #### Node selectors
 
@@ -213,7 +217,7 @@ All examples below assume that the NodePool doesn't have constraints to prevent 
          - matchExpressions:
            - key: "topology.kubernetes.io/zone"
              operator: "In"
-             values: ["us-west-2a, us-west-2b"]
+             values: ["us-west-2a", "us-west-2b"]
            - key: "topology.kubernetes.io/zone"
              operator: "In"
              values: ["us-west-2b"]
@@ -224,7 +228,7 @@ Changing the second operator to `NotIn` would allow the pod to run in `us-west-2
 ```yaml
            - key: "topology.kubernetes.io/zone"
              operator: "In"
-             values: ["us-west-2a, us-west-2b"]
+             values: ["us-west-2a", "us-west-2b"]
            - key: "topology.kubernetes.io/zone"
              operator: "NotIn"
              values: ["us-west-2b"]
@@ -242,7 +246,7 @@ Here, if `us-west-2a` is not available, the second term will cause the pod to ru
          - matchExpressions: # OR
            - key: "topology.kubernetes.io/zone" # AND
              operator: "In"
-             values: ["us-west-2a, us-west-2b"]
+             values: ["us-west-2a", "us-west-2b"]
            - key: "topology.kubernetes.io/zone" # AND
              operator: "NotIn"
              values: ["us-west-2b"]
@@ -280,7 +284,7 @@ spec:
           - p3
       taints:
       - key: nvidia.com/gpu
-        value: true
+        value: "true"
         effect: "NoSchedule"
 ```
 
@@ -350,6 +354,10 @@ The three supported `topologyKey` values that Karpenter supports are:
 
 
 See [Pod Topology Spread Constraints](https://kubernetes.io/docs/concepts/workloads/pods/pod-topology-spread-constraints/) for details.
+
+{{% alert title="Note" color="primary" %}}
+NodePools do not attempt to balance or rebalance the availability zones for their nodes. Availability zone balancing may be achieved by defining zonal Topology Spread Constraints for Pods that require multi-zone durability, and NodePools will respect these constraints while optimizing for compute costs.
+{{% /alert %}}
 
 ## Pod affinity/anti-affinity
 
@@ -528,24 +536,166 @@ Based on the way that Karpenter performs pod batching and bin packing, it is not
 
 ## Advanced Scheduling Techniques
 
+### Scheduling based on Node Resources
+
+You may want pods to be able to request resources of nodes that Kubernetes natively does not provide as a schedulable resource or that are aspects of certain nodes like
+High Performance Networking or NVME Local Storage. You can use Karpenter's Well-Known Labels to accomplish this.
+
+These can further be applied at the NodePool or Workload level using Requirements, NodeSelectors or Affinities
+
+Pod example of requiring any NVME disk:
+```yaml
+...
+ affinity:
+   nodeAffinity:
+     requiredDuringSchedulingIgnoredDuringExecution:
+       nodeSelectorTerms:
+         - matchExpressions:
+           - key: "karpenter.k8s.aws/instance-local-nvme"
+             operator: "Exists"
+...
+```
+
+NodePool Example:
+```yaml
+...
+requirement:
+  - key: "karpenter.k8s.aws/instance-local-nvme"
+    operator: "Exists"
+...
+```
+
+Pod example of requiring at least 100GB of NVME disk:
+```yaml
+...
+ affinity:
+   nodeAffinity:
+     requiredDuringSchedulingIgnoredDuringExecution:
+       nodeSelectorTerms:
+         - matchExpressions:
+            - key: "karpenter.k8s.aws/instance-local-nvme"
+              operator: Gt
+              values: ["99"]
+...
+```
+
+NodePool Example:
+```yaml
+...
+requirement:
+  - key: "karpenter.k8s.aws/instance-local-nvme"
+    operator: Gt
+    values: ["99"]
+...
+```
+
+{{% alert title="Note" color="primary" %}}
+Karpenter cannot yet take into account ephemeral-storage requests while scheduling pods, we're purely requesting attributes of nodes and getting X amount of resources
+as a side effect. You may need to tweak schedulable resources like CPU or Memory to achieve desired fit, especially if Consolidation is enabled.
+
+Your NodeClass will also need to support automatically formatting and mounting NVME Instance Storage if available.
+{{% /alert %}}
+
+Pod example of requiring at least 50 Gbps of network bandwidth:
+```yaml
+...
+ affinity:
+   nodeAffinity:
+     requiredDuringSchedulingIgnoredDuringExecution:
+       nodeSelectorTerms:
+         - matchExpressions:
+            - key: "karpenter.k8s.aws/instance-network-bandwidth"
+              operator: Gt
+              values: ["49999"]
+...
+```
+
+NodePool Example:
+```yaml
+...
+requirement:
+  - key: "karpenter.k8s.aws/instance-network-bandwidth"
+    operator: Gt
+    values: ["49999"]
+...
+```
+
+{{% alert title="Note" color="primary" %}}
+If using Gt/Lt operators, make sure to use values under the actual label values of the desired resource.
+{{% /alert %}}
+
 ### `Exists` Operator
 
 The `Exists` operator can be used on a NodePool to provide workload segregation across nodes.
 
 ```yaml
-...
-requirements:
-- key: company.com/team
-  operator: Exists
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+spec:
+  template:
+    spec:
+      requirements:
+        - key: company.com/team
+          operator: Exists
 ...
 ```
 
-With the requirement on the NodePool, workloads can optionally specify a custom value as a required node affinity or node selector.  Karpenter will then label the nodes it launches for these pods which prevents `kube-scheduler` from scheduling conflicting pods to those nodes.  This provides a way to more dynamically isolate workloads without requiring a unique NodePool for each workload subset.
+With this requirement on the NodePool, workloads can specify the same key (e.g. `company.com/team`) with custom values (e.g. `team-a`, `team-b`, etc.) as a required `nodeAffinity` or `nodeSelector`. Karpenter will then apply the key/value pair to nodes it launches dynamically based on the pod's node requirements.
+
+If each set of pods that can schedule with this NodePool specifies this key in its `nodeAffinity` or `nodeSelector`, you can isolate pods onto different nodes based on their values. This provides a way to more dynamically isolate workloads without requiring a unique NodePool for each workload subset.
+
+For example, providing the following `nodeSelectors` would isolate the pods for each of these deployments on different nodes.
+
+#### Team A Deployment
 
 ```yaml
-nodeSelector:
-  company.com/team: team-a
+apiVersion: v1
+kind: Deployment
+metadata:
+  name: team-a-deployment
+spec:
+  replicas: 5
+  template:
+    spec:
+      nodeSelector:
+        company.com/team: team-a
 ```
+
+#### Team A Node
+
+```yaml
+apiVersion: v1
+kind: Node
+metadata:
+  labels:
+    company.com/team: team-a
+```
+
+#### Team B Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: team-b-deployment
+spec:
+  replicas: 5
+  template:
+    spec:
+      nodeSelector:
+        company.com/team: team-b
+```
+
+#### Team B Node
+
+```yaml
+apiVersion: v1
+kind: Node
+metadata:
+  labels:
+    company.com/team: team-b
+```
+
 {{% alert title="Note" color="primary" %}}
 If a workload matches the NodePool but doesn't specify a label, Karpenter will generate a random label for the node.
 {{% /alert %}}

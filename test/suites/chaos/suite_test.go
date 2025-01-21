@@ -22,22 +22,23 @@ import (
 	"time"
 
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 	nodeutils "sigs.k8s.io/karpenter/pkg/utils/node"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/test/pkg/debug"
 	"github.com/aws/karpenter-provider-aws/test/pkg/environment/aws"
 
@@ -46,8 +47,8 @@ import (
 )
 
 var env *aws.Environment
-var nodeClass *v1beta1.EC2NodeClass
-var nodePool *corev1beta1.NodePool
+var nodeClass *v1.EC2NodeClass
+var nodePool *karpv1.NodePool
 
 func TestChaos(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -74,13 +75,15 @@ var _ = Describe("Chaos", func() {
 			ctx, cancel := context.WithCancel(env.Context)
 			defer cancel()
 
-			nodePool = coretest.ReplaceRequirements(nodePool, v1.NodeSelectorRequirement{
-				Key:      corev1beta1.CapacityTypeLabelKey,
-				Operator: v1.NodeSelectorOpIn,
-				Values:   []string{corev1beta1.CapacityTypeSpot},
+			nodePool = coretest.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
+				NodeSelectorRequirement: corev1.NodeSelectorRequirement{
+					Key:      karpv1.CapacityTypeLabelKey,
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{karpv1.CapacityTypeSpot},
+				},
 			})
-			nodePool.Spec.Disruption.ConsolidationPolicy = corev1beta1.ConsolidationPolicyWhenUnderutilized
-			nodePool.Spec.Disruption.ConsolidateAfter = nil
+			nodePool.Spec.Disruption.ConsolidationPolicy = karpv1.ConsolidationPolicyWhenEmptyOrUnderutilized
+			nodePool.Spec.Disruption.ConsolidateAfter = karpv1.MustParseNillableDuration("0s")
 
 			numPods := 1
 			dep := coretest.Deployment(coretest.DeploymentOptions{
@@ -101,7 +104,7 @@ var _ = Describe("Chaos", func() {
 
 			// Expect that we never get over a high number of nodes
 			Consistently(func(g Gomega) {
-				list := &v1.NodeList{}
+				list := &corev1.NodeList{}
 				g.Expect(env.Client.List(env.Context, list, client.HasLabels{coretest.DiscoveryLabel})).To(Succeed())
 				g.Expect(len(list.Items)).To(BeNumerically("<", 35))
 			}, time.Minute*5).Should(Succeed())
@@ -110,8 +113,8 @@ var _ = Describe("Chaos", func() {
 			ctx, cancel := context.WithCancel(env.Context)
 			defer cancel()
 
-			nodePool.Spec.Disruption.ConsolidationPolicy = corev1beta1.ConsolidationPolicyWhenEmpty
-			nodePool.Spec.Disruption.ConsolidateAfter = &corev1beta1.NillableDuration{Duration: lo.ToPtr(30 * time.Second)}
+			nodePool.Spec.Disruption.ConsolidationPolicy = karpv1.ConsolidationPolicyWhenEmpty
+			nodePool.Spec.Disruption.ConsolidateAfter = karpv1.MustParseNillableDuration("30s")
 			numPods := 1
 			dep := coretest.Deployment(coretest.DeploymentOptions{
 				Replicas: int32(numPods),
@@ -131,7 +134,7 @@ var _ = Describe("Chaos", func() {
 
 			// Expect that we never get over a high number of nodes
 			Consistently(func(g Gomega) {
-				list := &v1.NodeList{}
+				list := &corev1.NodeList{}
 				g.Expect(env.Client.List(env.Context, list, client.HasLabels{coretest.DiscoveryLabel})).To(Succeed())
 				g.Expect(len(list.Items)).To(BeNumerically("<", 35))
 			}, time.Minute*5).Should(Succeed())
@@ -144,15 +147,15 @@ type taintAdder struct {
 }
 
 func (t *taintAdder) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-	node := &v1.Node{}
+	node := &corev1.Node{}
 	if err := t.kubeClient.Get(ctx, req.NamespacedName, node); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
-	mergeFrom := client.MergeFrom(node.DeepCopy())
-	taint := v1.Taint{
+	mergeFrom := client.StrategicMergeFrom(node.DeepCopy())
+	taint := corev1.Taint{
 		Key:    "test",
 		Value:  "true",
-		Effect: v1.TaintEffectNoExecute,
+		Effect: corev1.TaintEffectNoExecute,
 	}
 	if !lo.Contains(node.Spec.Taints, taint) {
 		node.Spec.Taints = append(node.Spec.Taints, taint)
@@ -165,9 +168,10 @@ func (t *taintAdder) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 func (t *taintAdder) Builder(mgr manager.Manager) *controllerruntime.Builder {
 	return controllerruntime.NewControllerManagedBy(mgr).
-		For(&v1.Node{}).
+		For(&corev1.Node{}).
+		WithOptions(controller.Options{SkipNameValidation: lo.ToPtr(true)}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-			node := obj.(*v1.Node)
+			node := obj.(*corev1.Node)
 			if _, ok := node.Labels[coretest.DiscoveryLabel]; !ok {
 				return false
 			}
@@ -195,7 +199,7 @@ func startNodeCountMonitor(ctx context.Context, kubeClient client.Client) {
 	deletedNodes := atomic.Int64{}
 
 	factory := informers.NewSharedInformerFactoryWithOptions(env.KubeClient, time.Second*30,
-		informers.WithTweakListOptions(func(l *metav1.ListOptions) { l.LabelSelector = corev1beta1.NodePoolLabelKey }))
+		informers.WithTweakListOptions(func(l *metav1.ListOptions) { l.LabelSelector = karpv1.NodePoolLabelKey }))
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	_ = lo.Must(nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(_ interface{}) {
@@ -208,10 +212,10 @@ func startNodeCountMonitor(ctx context.Context, kubeClient client.Client) {
 	factory.Start(ctx.Done())
 	go func() {
 		for {
-			list := &v1.NodeList{}
+			list := &corev1.NodeList{}
 			if err := kubeClient.List(ctx, list, client.HasLabels{coretest.DiscoveryLabel}); err == nil {
-				readyCount := lo.CountBy(list.Items, func(n v1.Node) bool {
-					return nodeutils.GetCondition(&n, v1.NodeReady).Status == v1.ConditionTrue
+				readyCount := lo.CountBy(list.Items, func(n corev1.Node) bool {
+					return nodeutils.GetCondition(&n, corev1.NodeReady).Status == corev1.ConditionTrue
 				})
 				fmt.Printf("[NODE COUNT] CURRENT: %d | READY: %d | CREATED: %d | DELETED: %d\n", len(list.Items), readyCount, createdNodes.Load(), deletedNodes.Load())
 			}

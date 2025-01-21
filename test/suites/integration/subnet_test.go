@@ -17,18 +17,24 @@ package integration_test
 import (
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/awslabs/operatorpkg/status"
 	"github.com/onsi/gomega/types"
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"sigs.k8s.io/karpenter/pkg/test"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/test/pkg/environment/aws"
 
+	. "github.com/awslabs/operatorpkg/test/expectations"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -40,7 +46,7 @@ var _ = Describe("Subnets", func() {
 		shuffledAZs := lo.Shuffle(lo.Keys(subnets))
 		firstSubnet := subnets[shuffledAZs[0]][0]
 
-		nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
+		nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
 			{
 				ID: firstSubnet,
 			},
@@ -73,12 +79,12 @@ var _ = Describe("Subnets", func() {
 	})
 	It("should use the subnet tag selector with multiple tag values", func() {
 		// Get all the subnets for the cluster
-		subnets := env.GetSubnetNameAndIds(map[string]string{"karpenter.sh/discovery": env.ClusterName})
+		subnets := env.GetSubnetInfo(map[string]string{"karpenter.sh/discovery": env.ClusterName})
 		Expect(len(subnets)).To(BeNumerically(">", 1))
 		firstSubnet := subnets[0]
 		lastSubnet := subnets[len(subnets)-1]
 
-		nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{
+		nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
 			{
 				Tags: map[string]string{"Name": firstSubnet.Name},
 			},
@@ -100,11 +106,12 @@ var _ = Describe("Subnets", func() {
 		Expect(len(subnets)).ToNot(Equal(0))
 		shuffledAZs := lo.Shuffle(lo.Keys(subnets))
 
-		test.ReplaceRequirements(nodePool, v1.NodeSelectorRequirement{
-			Key:      v1.LabelZoneFailureDomainStable,
-			Operator: "In",
-			Values:   []string{shuffledAZs[0]},
-		})
+		test.ReplaceRequirements(nodePool, karpv1.NodeSelectorRequirementWithMinValues{
+			NodeSelectorRequirement: corev1.NodeSelectorRequirement{
+				Key:      corev1.LabelZoneFailureDomainStable,
+				Operator: "In",
+				Values:   []string{shuffledAZs[0]},
+			}})
 		pod := test.Pod()
 
 		env.ExpectCreated(pod, nodeClass, nodePool)
@@ -119,20 +126,32 @@ var _ = Describe("Subnets", func() {
 	It("should have the NodeClass status for subnets", func() {
 		env.ExpectCreated(nodeClass)
 		EventuallyExpectSubnets(env, nodeClass)
+		ExpectStatusConditions(env, env.Client, 1*time.Minute, nodeClass, status.Condition{Type: v1.ConditionTypeSubnetsReady, Status: metav1.ConditionTrue})
+		ExpectStatusConditions(env, env.Client, 1*time.Minute, nodeClass, status.Condition{Type: status.ConditionReady, Status: metav1.ConditionTrue})
+	})
+	It("should have the NodeClass status as not ready since subnets were not resolved", func() {
+		nodeClass.Spec.SubnetSelectorTerms = []v1.SubnetSelectorTerm{
+			{
+				Tags: map[string]string{"karpenter.sh/discovery": "invalidName"},
+			},
+		}
+		env.ExpectCreated(nodeClass)
+		ExpectStatusConditions(env, env.Client, 1*time.Minute, nodeClass, status.Condition{Type: v1.ConditionTypeSubnetsReady, Status: metav1.ConditionFalse, Message: "SubnetSelector did not match any Subnets"})
+		ExpectStatusConditions(env, env.Client, 1*time.Minute, nodeClass, status.Condition{Type: status.ConditionReady, Status: metav1.ConditionFalse, Message: "SubnetsReady=False"})
 	})
 })
 
 func ExpectResourceBasedNamingEnabled(subnetIDs ...string) {
 	for subnetID := range subnetIDs {
-		_, err := env.EC2API.ModifySubnetAttribute(&ec2.ModifySubnetAttributeInput{
-			EnableResourceNameDnsARecordOnLaunch: &ec2.AttributeBooleanValue{
+		_, err := env.EC2API.ModifySubnetAttribute(env.Context, &ec2.ModifySubnetAttributeInput{
+			EnableResourceNameDnsARecordOnLaunch: &ec2types.AttributeBooleanValue{
 				Value: lo.ToPtr(true),
 			},
 			SubnetId: lo.ToPtr(subnetIDs[subnetID]),
 		})
 		Expect(err).To(BeNil())
-		_, err = env.EC2API.ModifySubnetAttribute(&ec2.ModifySubnetAttributeInput{
-			PrivateDnsHostnameTypeOnLaunch: lo.ToPtr("resource-name"),
+		_, err = env.EC2API.ModifySubnetAttribute(env.Context, &ec2.ModifySubnetAttributeInput{
+			PrivateDnsHostnameTypeOnLaunch: "resource-name",
 			SubnetId:                       lo.ToPtr(subnetIDs[subnetID]),
 		})
 		Expect(err).To(BeNil())
@@ -141,15 +160,15 @@ func ExpectResourceBasedNamingEnabled(subnetIDs ...string) {
 
 func ExpectResourceBasedNamingDisabled(subnetIDs ...string) {
 	for subnetID := range subnetIDs {
-		_, err := env.EC2API.ModifySubnetAttribute(&ec2.ModifySubnetAttributeInput{
-			EnableResourceNameDnsARecordOnLaunch: &ec2.AttributeBooleanValue{
+		_, err := env.EC2API.ModifySubnetAttribute(env.Context, &ec2.ModifySubnetAttributeInput{
+			EnableResourceNameDnsARecordOnLaunch: &ec2types.AttributeBooleanValue{
 				Value: lo.ToPtr(false),
 			},
 			SubnetId: lo.ToPtr(subnetIDs[subnetID]),
 		})
 		Expect(err).To(BeNil())
-		_, err = env.EC2API.ModifySubnetAttribute(&ec2.ModifySubnetAttributeInput{
-			PrivateDnsHostnameTypeOnLaunch: lo.ToPtr("ip-name"),
+		_, err = env.EC2API.ModifySubnetAttribute(env.Context, &ec2.ModifySubnetAttributeInput{
+			PrivateDnsHostnameTypeOnLaunch: "ip-name",
 			SubnetId:                       lo.ToPtr(subnetIDs[subnetID]),
 		})
 		Expect(err).To(BeNil())
@@ -168,15 +187,15 @@ type SubnetInfo struct {
 	ID   string
 }
 
-func EventuallyExpectSubnets(env *aws.Environment, nodeClass *v1beta1.EC2NodeClass) {
+func EventuallyExpectSubnets(env *aws.Environment, nodeClass *v1.EC2NodeClass) {
 	subnets := env.GetSubnets(map[string]string{"karpenter.sh/discovery": env.ClusterName})
 	Expect(subnets).ToNot(HaveLen(0))
 	ids := sets.New(lo.Flatten(lo.Values(subnets))...)
 
 	Eventually(func(g Gomega) {
-		temp := &v1beta1.EC2NodeClass{}
+		temp := &v1.EC2NodeClass{}
 		g.Expect(env.Client.Get(env, client.ObjectKeyFromObject(nodeClass), temp)).To(Succeed())
-		g.Expect(sets.New(lo.Map(temp.Status.Subnets, func(s v1beta1.Subnet, _ int) string {
+		g.Expect(sets.New(lo.Map(temp.Status.Subnets, func(s v1.Subnet, _ int) string {
 			return s.ID
 		})...).Equal(ids))
 	}).WithTimeout(10 * time.Second).Should(Succeed())

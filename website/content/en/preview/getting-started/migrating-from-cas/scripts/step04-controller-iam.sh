@@ -19,7 +19,7 @@ cat << EOF > controller-trust-policy.json
 }
 EOF
 
-aws iam create-role --role-name KarpenterControllerRole-${CLUSTER_NAME} \
+aws iam create-role --role-name "KarpenterControllerRole-${CLUSTER_NAME}" \
     --assume-role-policy-document file://controller-trust-policy.json
 
 cat << EOF > controller-policy.json
@@ -36,7 +36,6 @@ cat << EOF > controller-policy.json
                 "ec2:DescribeInstances",
                 "ec2:DescribeInstanceTypes",
                 "ec2:DescribeInstanceTypeOfferings",
-                "ec2:DescribeAvailabilityZones",
                 "ec2:DeleteLaunchTemplate",
                 "ec2:CreateTags",
                 "ec2:CreateLaunchTemplate",
@@ -138,6 +137,6 @@ cat << EOF > controller-policy.json
 }
 EOF
 
-aws iam put-role-policy --role-name KarpenterControllerRole-${CLUSTER_NAME} \
-    --policy-name KarpenterControllerPolicy-${CLUSTER_NAME} \
+aws iam put-role-policy --role-name "KarpenterControllerRole-${CLUSTER_NAME}" \
+    --policy-name "KarpenterControllerPolicy-${CLUSTER_NAME}" \
     --policy-document file://controller-policy.json

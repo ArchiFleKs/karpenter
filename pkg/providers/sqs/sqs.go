@@ -18,82 +18,86 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/samber/lo"
+
+	sdk "github.com/aws/karpenter-provider-aws/pkg/aws"
 )
 
-type Provider struct {
-	client sqsiface.SQSAPI
-
-	name string
-	url  string
+type Provider interface {
+	Name() string
+	GetSQSMessages(context.Context) ([]*sqstypes.Message, error)
+	SendMessage(context.Context, interface{}) (string, error)
+	DeleteSQSMessage(context.Context, *sqstypes.Message) error
 }
 
-func NewProvider(ctx context.Context, client sqsiface.SQSAPI, queueName string) (*Provider, error) {
-	ret, err := client.GetQueueUrlWithContext(ctx, &sqs.GetQueueUrlInput{
-		QueueName: aws.String(queueName),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("fetching queue url, %w", err)
-	}
-	return &Provider{
-		client: client,
-		name:   queueName,
-		url:    aws.StringValue(ret.QueueUrl),
+type DefaultProvider struct {
+	client sdk.SQSAPI
+
+	queueURL string
+}
+
+func NewDefaultProvider(client sdk.SQSAPI, queueURL string) (*DefaultProvider, error) {
+	return &DefaultProvider{
+		client:   client,
+		queueURL: queueURL,
 	}, nil
 }
 
-func (p *Provider) Name() string {
-	return p.name
+func (p *DefaultProvider) Name() string {
+	ss := strings.Split(p.queueURL, "/")
+	return ss[len(ss)-1]
 }
 
-func (p *Provider) GetSQSMessages(ctx context.Context) ([]*sqs.Message, error) {
+func (p *DefaultProvider) GetSQSMessages(ctx context.Context) ([]*sqstypes.Message, error) {
 	input := &sqs.ReceiveMessageInput{
-		MaxNumberOfMessages: aws.Int64(10),
-		VisibilityTimeout:   aws.Int64(20), // Seconds
-		WaitTimeSeconds:     aws.Int64(20), // Seconds, maximum for long polling
-		AttributeNames: []*string{
-			aws.String(sqs.MessageSystemAttributeNameSentTimestamp),
+		MaxNumberOfMessages: int32(10),
+		VisibilityTimeout:   int32(20), // Seconds
+		WaitTimeSeconds:     int32(20), // Seconds, maximum for long polling
+		AttributeNames: []sqstypes.QueueAttributeName{
+			sqstypes.QueueAttributeName(sqstypes.MessageSystemAttributeNameSentTimestamp),
 		},
-		MessageAttributeNames: []*string{
-			aws.String(sqs.QueueAttributeNameAll),
+		MessageAttributeNames: []string{
+			string(sqstypes.QueueAttributeNameAll),
 		},
-		QueueUrl: aws.String(p.url),
+		QueueUrl: aws.String(p.queueURL),
 	}
 
-	result, err := p.client.ReceiveMessageWithContext(ctx, input)
+	result, err := p.client.ReceiveMessage(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("receiving sqs messages, %w", err)
 	}
 
-	return result.Messages, nil
+	return lo.ToSlicePtr(result.Messages), nil
 }
 
-func (p *Provider) SendMessage(ctx context.Context, body interface{}) (string, error) {
+func (p *DefaultProvider) SendMessage(ctx context.Context, body interface{}) (string, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("marshaling the passed body as json, %w", err)
 	}
 	input := &sqs.SendMessageInput{
 		MessageBody: aws.String(string(raw)),
-		QueueUrl:    aws.String(p.url),
+		QueueUrl:    aws.String(p.queueURL),
 	}
-	result, err := p.client.SendMessageWithContext(ctx, input)
+	result, err := p.client.SendMessage(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("sending messages to sqs queue, %w", err)
 	}
-	return aws.StringValue(result.MessageId), nil
+	return aws.ToString(result.MessageId), nil
 }
 
-func (p *Provider) DeleteSQSMessage(ctx context.Context, msg *sqs.Message) error {
+func (p *DefaultProvider) DeleteSQSMessage(ctx context.Context, msg *sqstypes.Message) error {
 	input := &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(p.url),
+		QueueUrl:      aws.String(p.queueURL),
 		ReceiptHandle: msg.ReceiptHandle,
 	}
 
-	if _, err := p.client.DeleteMessageWithContext(ctx, input); err != nil {
+	if _, err := p.client.DeleteMessage(ctx, input); err != nil {
 		return fmt.Errorf("deleting messages from sqs queue, %w", err)
 	}
 	return nil

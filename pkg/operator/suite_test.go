@@ -19,10 +19,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/service/eks"
+	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
+
+	"github.com/aws/aws-sdk-go-v2/service/eks"
+	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/samber/lo"
 
-	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
@@ -33,8 +35,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "knative.dev/pkg/logging/testing"
 	. "sigs.k8s.io/karpenter/pkg/test/expectations"
+	. "sigs.k8s.io/karpenter/pkg/utils/testing"
 )
 
 var ctx context.Context
@@ -49,7 +51,7 @@ func TestAWS(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
+	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
 	ctx, stop = context.WithCancel(ctx)
 
 	fakeEKSAPI = &fake.EKSAPI{}
@@ -83,7 +85,7 @@ var _ = Describe("Operator", func() {
 		}))
 		fakeEKSAPI.DescribeClusterBehavior.Output.Set(
 			&eks.DescribeClusterOutput{
-				Cluster: &eks.Cluster{
+				Cluster: &ekstypes.Cluster{
 					Endpoint: lo.ToPtr("https://cluster-endpoint.test-cluster.k8s.local"),
 				},
 			},

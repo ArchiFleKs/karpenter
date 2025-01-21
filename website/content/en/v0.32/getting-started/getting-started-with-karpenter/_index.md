@@ -32,7 +32,7 @@ Install these tools before proceeding:
 
 1. [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html)
 2. `kubectl` - [the Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/)
-3. `eksctl` - [the CLI for AWS EKS](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
+3. `eksctl` - [the CLI for AWS EKS](https://eksctl.io/installation)
 4. `helm` - [the package manager for Kubernetes](https://helm.sh/docs/intro/install/)
 
 [Configure the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html)
@@ -45,8 +45,8 @@ After setting up the tools, set the Karpenter and Kubernetes version:
 
 ```bash
 export KARPENTER_NAMESPACE=karpenter
-export KARPENTER_VERSION=v0.32.3
-export K8S_VERSION={{< param "latest_k8s_version" >}}
+export KARPENTER_VERSION=v0.32.10
+export K8S_VERSION=1.28
 ```
 
 Then set the following environment variable:
@@ -58,7 +58,7 @@ If you open a new shell to run steps in this procedure, you need to set some or 
 To remind yourself of these values, type:
 
 ```bash
-echo $KARPENTER_NAMESPACE $KARPENTER_VERSION $K8S_VERSION $CLUSTER_NAME $AWS_DEFAULT_REGION $AWS_ACCOUNT_ID $TEMPOUT
+echo "${KARPENTER_NAMESPACE}" "${KARPENTER_VERSION}" "${K8S_VERSION}" "${CLUSTER_NAME}" "${AWS_DEFAULT_REGION}" "${AWS_ACCOUNT_ID}" "${TEMPOUT}" "${ARM_AMI_ID}" "${AMD_AMI_ID}" "${GPU_AMI_ID}"
 ```
 
 {{% /alert %}}
@@ -78,6 +78,9 @@ The following cluster configuration will:
 * Run helm to install karpenter
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step02-create-cluster.sh" language="bash"%}}
+
+Unless your AWS account has already onboarded to EC2 Spot, you will need to create the service linked role to
+avoid the [`ServiceLinkedRoleCreationNotPermitted` error]({{<ref "../../troubleshooting/#missing-service-linked-role" >}}).
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step06-add-spot-role.sh" language="bash"%}}
 
@@ -180,6 +183,7 @@ com.amazonaws.<region>.s3 – For pulling container images
 com.amazonaws.<region>.sts – For IAM roles for service accounts
 com.amazonaws.<region>.ssm - For resolving default AMIs
 com.amazonaws.<region>.sqs - For accessing SQS if using interruption handling
+com.amazonaws.<region>.eks - For Karpenter to discover the cluster endpoint
 ```
 
 If you do not currently have these endpoints surfaced in your VPC, you can add the endpoints by running
@@ -191,6 +195,19 @@ aws ec2 create-vpc-endpoint --vpc-id ${VPC_ID} --service-name ${SERVICE_NAME} --
 {{% alert title="Note" color="primary" %}}
 
 Karpenter (controller and webhook deployment) container images must be in or copied to Amazon ECR private or to a another private registry accessible from inside the VPC. If these are not available from within the VPC, or from networks peered with the VPC, you will get Image pull errors when Kubernetes tries to pull these images from ECR public.
+
+{{% /alert %}}
+
+{{% alert title="Note" color="primary" %}}
+
+There is currently no VPC private endpoint for the [IAM API](https://docs.aws.amazon.com/IAM/latest/APIReference/welcome.html). As a result, you cannot use the default `spec.role` field in your `EC2NodeClass`. Instead, you need to provision and manage an instance profile manually and then specify Karpenter to use this instance profile through the `spec.instanceProfile` field.
+
+You can provision an instance profile manually and assign a Node role to it by calling the following command
+
+```bash
+aws iam create-instance-profile --instance-profile-name "KarpenterNodeInstanceProfile-${CLUSTER_NAME}"
+aws iam add-role-to-instance-profile --instance-profile-name "KarpenterNodeInstanceProfile-${CLUSTER_NAME}" --role-name "KarpenterNodeRole-${CLUSTER_NAME}"
+```
 
 {{% /alert %}}
 

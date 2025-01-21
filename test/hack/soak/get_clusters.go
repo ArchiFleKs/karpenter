@@ -18,21 +18,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
-	"github.com/aws/aws-sdk-go/aws"
+
 	"github.com/samber/lo"
 )
 
 type cluster struct {
 	Name    string `json:"cluster_name"`
+	GitRef  string `json:"git_ref"`
 	Cleanup bool   `json:"cluster_cleanup"`
 }
 
 const expirationTTL = time.Hour * 168 // 7 days
+
+var excludedClustersCleanup = []string{}
 
 func main() {
 	ctx := context.Background()
@@ -51,8 +56,12 @@ func main() {
 			createNewCluster = false
 		}
 
-		if strings.HasPrefix(c, "soak-periodic-") {
-			outputList = append(outputList, &cluster{Name: c, Cleanup: clusterDetails.Cluster.CreatedAt.Before(expirationTime)})
+		if strings.HasPrefix(c, "soak-periodic-") && !slices.Contains(excludedClustersCleanup, c) {
+			outputList = append(outputList, &cluster{
+				Name:    c,
+				GitRef:  clusterDetails.Cluster.Tags["test/git_ref"],
+				Cleanup: clusterDetails.Cluster.CreatedAt.Before(expirationTime),
+			})
 		}
 	}
 

@@ -61,7 +61,7 @@ Node role names for Karpenter are created in the form `KarpenterNodeRole-${Clust
 If a long cluster name causes the Karpenter node role name to exceed 64 characters, creating that object will fail.
 
 Keep in mind that `KarpenterNodeRole-` is just a recommendation from the getting started guide.
-Instead using of the eksctl role, you can shorten the name to anything you like, as long as it has the right permissions.
+Instead of using the eksctl role, you can shorten the name to anything you like, as long as it has the right permissions.
 
 ### Unknown field in Provisioner spec
 
@@ -105,14 +105,15 @@ Karpenter v0.26.1+ introduced the `karpenter-crd` helm chart. When installing th
 - In the case of `invalid ownership metadata; label validation error: missing key "app.kubernetes.io/managed-by": must be set to "Helm"` run:
 
 ```shell
-kubectl label crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
+kubectl label crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
 ```
 
 - In the case of `annotation validation error: missing key "meta.helm.sh/release-namespace": must be set to "karpenter"` run:
 
 ```shell
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-namespace=karpenter --overwrite
+KARPENTER_NAMESPACE=karpenter
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-namespace="${KARPENTER_NAMESPACE}" --overwrite
 ```
 
 ## Uninstallation
@@ -284,7 +285,23 @@ Karpenter does not support [in-tree storage plugins](https://kubernetes.io/blog/
 
 #### Pods were scheduled due to a race condition in Kubernetes
 
-Due to [this race condition in Kubernetes](https://github.com/kubernetes/kubernetes/issues/95911), it's possible that the scheduler and the CSINode can race during node registration such that the scheduler assumes that a node can mount more volumes than the node attachments support. There is currently no solve for this problem other than enforcing `toplogySpreadConstraints` and `podAntiAffinity` on your workloads that use PVCs such that you attempt to reduce the number of PVCs that schedule to a given node.
+Due to [this race condition in Kubernetes](https://github.com/kubernetes/kubernetes/issues/95911), it's possible that the scheduler and the CSINode can race during node registration such that the scheduler assumes that a node can mount more volumes than the node attachments support. There is currently no universal solve for this problem other than enforcing `topologySpreadConstraints` and `podAntiAffinity` on your workloads that use PVCs such that you attempt to reduce the number of PVCs that schedule to a given node.
+
+The following is a list of known CSI drivers which support a startupTaint to eliminate this issue:
+- [aws-ebs-csi-driver](https://github.com/kubernetes-sigs/aws-ebs-csi-driver/blob/master/docs/install.md#configure-node-startup-taint)
+- [aws-efs-csi-driver](https://github.com/kubernetes-sigs/aws-efs-csi-driver/tree/master/docs#configure-node-startup-taint)
+
+These taints should be configured via `startupTaints` on your `NodePool`. For example, to enable this for EBS, add the following to your `NodePool`:
+```yaml
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+spec:
+  template:
+    spec:
+      startupTaints:
+        - key: ebs.csi.aws.com/agent-not-ready
+          effect: NoExecute
+```
 
 ### CNI is unable to allocate IPs to pods
 
@@ -302,6 +319,11 @@ By default, the number of pods on a node is limited by both the number of networ
 
 If the max-pods (configured through your Provisioner [`kubeletConfiguration`]({{<ref "./concepts/nodepools#speckubeletconfiguration" >}})) is greater than the number of supported IPs for a given instance type, the CNI will fail to assign an IP to the pod and your pod will be left in a `ContainerCreating` state.
 
+If you've enabled [Security Groups per Pod](https://aws.github.io/aws-eks-best-practices/networking/sgpp/), one of the instance's ENIs is reserved as the trunk interface and uses branch interfaces off of that trunk interface to assign different security groups.
+If you do not have any `SecurityGroupPolicies` configured for your pods, they will be unable to utilize branch interfaces attached to the trunk interface, and IPs will only be available from the non-trunk ENIs.
+This effectively reduces the max-pods value by the number of IPs that would have been available from the trunk ENI.
+Note that Karpenter is not aware if [Security Groups per Pod](https://aws.github.io/aws-eks-best-practices/networking/sgpp/) is enabled, and will continue to compute max-pods assuming all ENIs on the instance can be utilized.
+
 ##### Solutions
 
 To avoid this discrepancy between `maxPods` and the supported pod density of the EC2 instance based on ENIs and allocatable IPs, you can perform one of the following actions on your cluster:
@@ -309,6 +331,7 @@ To avoid this discrepancy between `maxPods` and the supported pod density of the
 1. Enable [Prefix Delegation](https://www.eksworkshop.com/docs/networking/prefix/) to increase the number of allocatable IPs for the ENIs on each instance type
 2. Reduce your `maxPods` value to be under the maximum pod density for the instance types assigned to your Provisioner
 3. Remove the `maxPods` value from your [`kubeletConfiguration`]({{<ref "./concepts/nodepools#speckubeletconfiguration" >}}) if you no longer need it and instead rely on the defaulted values from Karpenter and EKS AMIs.
+4. Set [RESERVED_ENIS]({{<ref "./reference/settings" >}})=1 in your Karpenter configuration to account for the reserved ENI when using Security Groups for Pods.
 
 For more information on pod density, view the [Pod Density Section in the NodePools doc]({{<ref "./concepts/nodepools#pod-density" >}}).
 
@@ -358,7 +381,7 @@ then the following solution(s) may resolve your issue.
 #### Solution(s)
 1. Verify that the instance role of the Windows node includes the RBAC permission group `eks:kube-proxy-windows` as shown below.
    This group is required for Windows nodes because in Windows, `kube-proxy` runs as a process on the node, and as such, the node requires the necessary RBAC cluster permissions to allow access to the resources required by `kube-proxy`.
-   For more information, see https://docs.aws.amazon.com/eks/latest/userguide/windows-support.html. 
+   For more information, see https://docs.aws.amazon.com/eks/latest/userguide/windows-support.html.
 ```yaml
 ...
   username: system:node:{{EC2PrivateDNSName}}
@@ -367,6 +390,106 @@ then the following solution(s) may resolve your issue.
     - system:nodes
     - eks:kube-proxy-windows # This is required for Windows DNS resolution to work
 ...
+```
+
+### Karpenter incorrectly computes available resources for a node
+
+When creating nodes, the allocatable resources Karpenter computed (as seen in logs and `nodeClaim.status.allocatable`) do not always match the allocatable resources on the created node (`node.status.allocatable`).
+Karpenter uses the results from `ec2:DescribeInstanceTypes` to determine the resources available on a node launched with a given instance type.
+The following computation is used to determine allocatable CPU, memory, and ephemeral storage based on the results returned from `ec2:DescribeInstanceTypes`.
+
+```
+nodeClaim.allocatable.cpu = instance.cpu - kubeReserved.cpu - systemReserved.cpu
+nodeClaim.allocatable.memory = (instance.memory * (1.0 - VM_MEMORY_OVERHEAD_PERCENT)) - kubeReserved.memory - systemReserved.memory - max(evictionSoft.memory.available, evictionHard.memory.available)
+nodeClaim.allocatable.ephemeralStorage = instance.storage - kubeReserved.ephemeralStorage - systemReserved.ephemeralStorage - max(evictionSoft.nodefs.available, evictionHard.nodefs.available)
+```
+
+Most of these factors directly model user configuration (i.e. the KubeletConfiguration options).
+On the other hand, `VM_MEMORY_OVERHEAD_PERCENT` models an implicit reduction of available memory that varies by instance type and AMI.
+Karpenter can't compute the exact value being modeled, so `VM_MEMORY_OVERHEAD_PERCENT` is a [global setting]({{< ref "./reference/settings.md" >}}) used across all instance type and AMI combinations.
+The default value (`7.5%`) has been tuned to closely match reality for the majority of instance types while not overestimating.
+As a result, Karpenter will typically underestimate the memory availble on a node for a given instance type.
+If you know the real `VM_MEMORY_OVERHEAD_PERCENT` for the specific instances you're provisioning in your cluster, you can tune this value to tighten the bound.
+However, this should be done with caution.
+A `VM_MEMORY_OVERHEAD_PERCENT` which results in Karpenter overestimating the memory available on a node can result in Karpenter launching nodes which are too small for your workload.
+In the worst case, this can result in an instance launch loop and your workload remaining unschedulable indefinitely.
+
+### Karpenter Is Unable to Satisfy Topology Spread Constraint
+
+When scheduling pods with TopologySpreadConstraints, Karpenter will attempt to spread the pods across all eligible domains.
+Eligible domains are determined based on the pod's requirements, e.g. node affinity terms.
+However, pod's do not inherit the requirements of compatible NodePools.
+
+For example, consider the following NodePool and Deployment specs:
+
+```yaml
+appVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+      - key: topology.kubernetes.io/zone
+        operator: Exists
+---
+appVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: np-zonal-constraint
+  labels:
+    project: zone-specific-project
+spec:
+  template:
+    spec:
+      requirements:
+      - key: topology.kubernetes.io/zone
+        operator: In
+        values: ['us-east-1a', 'us-east-1b']
+      # ...
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inflate
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: inflate
+  template:
+    metadata:
+      labels:
+        app: inflate
+    spec:
+      nodeSelector:
+        project: zone-specific-project
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: inflate
+```
+
+This cluster has subnets in three availability zones: `us-east-1a`, `us-east-1b`, and `us-east-1c`.
+NodePool `default` can launch instance types in all three zones, but `np-zonal-constraint` is constrained to two.
+Since Karpenter uses the pod's requirements to derive eligible domains, and the pod does not have any zonal constraints, all three availability zones are considered eligible domains.
+However, the only NodePool compatible with the pod's requirements is `np-zonal-constraints`, which can only create instances in two of the three eligible domains.
+Karpenter will succeed to launch the first two instances, for the first two replicas, but will fail to provision capacity for subsequent replicas since it can't provision capacity in the third domain.
+
+In order to prevent these scenarios, you should ensure that all eligible domains for a pod can be provisioned by compatible NodePools, or constrain the pod such that it's eligble domains match those of the NodePools.
+To resolve this specific issue, zonal constraints should be added to the pod spec to match the requirements of `np-zonal-constraint`:
+```yaml
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: topology.kubernetes.io/zone
+            operator: In
+            values: ['us-east-1a', 'us-east-1b']
 ```
 
 ## Deprovisioning
@@ -619,7 +742,7 @@ To correct the problem if it occurs, you can use the approach that AWS EBS uses,
             "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:root"
         },
         "Action": [
-            "kms:Describe",
+            "kms:Describe*",
             "kms:Get*",
             "kms:List*",
             "kms:RevokeGrant"
@@ -635,7 +758,23 @@ This typically occurs when the node has not been considered fully initialized fo
 
 ### Log message of `inflight check failed for node, Expected resource "vpc.amazonaws.com/pod-eni" didn't register on the node` is reported
 
-This error indicates that the `vpc.amazonaws.com/pod-eni` resource was never reported on the node. If you've enabled Pod ENI for Karpenter nodes via the `aws.enablePodENI` setting, you will need to make the corresponding change to the VPC CNI to enable [security groups for pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) which will cause the resource to be registered.
+This error indicates that the `vpc.amazonaws.com/pod-eni` resource was never reported on the node. You will need to make the corresponding change to the VPC CNI to enable [security groups for pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) which will cause the resource to be registered.
+
+### AWS Node Termination Handler (NTH) interactions
+Karpenter [doesn't currently support draining and terminating on spot rebalance recommendations]({{< ref "concepts/disruption#interruption" >}}). Users who want support for both drain and terminate on spot interruption as well as drain and termination on spot rebalance recommendations may install Node Termination Handler (NTH) on their clusters to support this behavior.
+
+These two components do not share information between each other, meaning if you have drain and terminate functionality enabled on NTH, NTH may remove a node for a spot rebalance recommendation. Karpenter will replace the node to fulfill the pod capacity that was being fulfilled by the old node; however, Karpenter won't be aware of the reason that that node was terminated. This means that Karpenter may launch the same instance type that was just deprovisioned, causing a spot rebalance recommendation to be sent again. This can result in very short-lived instances where NTH continually removes nodes and Karpeneter re-launches the same instance type over and over again.
+
+Karpenter doesn't recommend reacting to spot rebalance recommendations when running Karpenter with spot nodes; however, if you absolutely require this functionality, note that the above scenario is possible.
+Spot instances are time limited and, therefore, interruptible. When a signal is sent by AWS, it triggers actions from NTH and Karpenter, where the former signals a shutdown and the later provisions, creating a recursive situation.
+This can be mitigated by either completely removing NTH or by setting the following values:
+
+* enableSpotInterruptionDraining: If false, do not drain nodes when the spot interruption termination notice is received. Only used in IMDS mode.
+enableSpotInterruptionDraining: false
+
+* enableRebalanceDrainin: If true, drain nodes when the rebalance recommendation notice is received. Only used in IMDS mode.
+enableRebalanceDraining: false
+
 
 ## Pricing
 

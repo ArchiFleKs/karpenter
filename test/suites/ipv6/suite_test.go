@@ -19,12 +19,14 @@ import (
 	"testing"
 
 	"github.com/samber/lo"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/aws/karpenter-provider-aws/test/pkg/environment/aws"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -32,8 +34,8 @@ import (
 )
 
 var env *aws.Environment
-var nodeClass *v1beta1.EC2NodeClass
-var nodePool *corev1beta1.NodePool
+var nodeClass *v1.EC2NodeClass
+var nodePool *karpv1.NodePool
 
 func TestIPv6(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -51,14 +53,18 @@ var _ = BeforeEach(func() {
 	nodeClass = env.DefaultEC2NodeClass()
 	nodePool = env.DefaultNodePool(nodeClass)
 	nodePool = coretest.ReplaceRequirements(nodePool,
-		v1.NodeSelectorRequirement{
-			Key:      v1beta1.LabelInstanceCategory,
-			Operator: v1.NodeSelectorOpExists,
+		karpv1.NodeSelectorRequirementWithMinValues{
+			NodeSelectorRequirement: corev1.NodeSelectorRequirement{
+				Key:      v1.LabelInstanceCategory,
+				Operator: corev1.NodeSelectorOpExists,
+			},
 		},
-		v1.NodeSelectorRequirement{
-			Key:      v1.LabelInstanceTypeStable,
-			Operator: v1.NodeSelectorOpIn,
-			Values:   []string{"t3a.small"},
+		karpv1.NodeSelectorRequirementWithMinValues{
+			NodeSelectorRequirement: corev1.NodeSelectorRequirement{
+				Key:      corev1.LabelInstanceTypeStable,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"t3a.small"},
+			},
 		},
 	)
 })
@@ -72,22 +78,38 @@ var _ = Describe("IPv6", func() {
 		env.EventuallyExpectHealthy(pod)
 		env.ExpectCreatedNodeCount("==", 1)
 		node := env.GetNode(pod.Spec.NodeName)
-		internalIPv6Addrs := lo.Filter(node.Status.Addresses, func(addr v1.NodeAddress, _ int) bool {
-			return addr.Type == v1.NodeInternalIP && net.ParseIP(addr.Address).To4() == nil
+		internalIPv6Addrs := lo.Filter(node.Status.Addresses, func(addr corev1.NodeAddress, _ int) bool {
+			return addr.Type == corev1.NodeInternalIP && net.ParseIP(addr.Address).To4() == nil
 		})
 		Expect(internalIPv6Addrs).To(HaveLen(1))
 	})
 	It("should provision an IPv6 node by discovering kubeletConfig kube-dns IP", func() {
 		clusterDNSAddr := env.ExpectIPv6ClusterDNS()
-		nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{ClusterDNS: []string{clusterDNSAddr}}
+		nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{ClusterDNS: []string{clusterDNSAddr}}
 		pod := coretest.Pod()
 		env.ExpectCreated(pod, nodeClass, nodePool)
 		env.EventuallyExpectHealthy(pod)
 		env.ExpectCreatedNodeCount("==", 1)
 		node := env.GetNode(pod.Spec.NodeName)
-		internalIPv6Addrs := lo.Filter(node.Status.Addresses, func(addr v1.NodeAddress, _ int) bool {
-			return addr.Type == v1.NodeInternalIP && net.ParseIP(addr.Address).To4() == nil
+		internalIPv6Addrs := lo.Filter(node.Status.Addresses, func(addr corev1.NodeAddress, _ int) bool {
+			return addr.Type == corev1.NodeInternalIP && net.ParseIP(addr.Address).To4() == nil
 		})
 		Expect(internalIPv6Addrs).To(HaveLen(1))
+	})
+	It("should provision a static IPv6 prefix with node launch and set IPv6 as primary in the primary network interface", func() {
+		clusterDNSAddr := env.ExpectIPv6ClusterDNS()
+		nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{ClusterDNS: []string{clusterDNSAddr}}
+		pod := coretest.Pod()
+		env.ExpectCreated(pod, nodeClass, nodePool)
+		env.EventuallyExpectHealthy(pod)
+		env.ExpectCreatedNodeCount("==", 1)
+		node := env.GetNode(pod.Spec.NodeName)
+		instance := env.GetInstanceByID(env.ExpectParsedProviderID(node.Spec.ProviderID))
+		Expect(instance.NetworkInterfaces).To(HaveLen(1))
+		Expect(instance.NetworkInterfaces[0].Ipv6Addresses).To(HaveLen(1))
+		_, hasIPv6Primary := lo.Find(instance.NetworkInterfaces[0].Ipv6Addresses, func(ip types.InstanceIpv6Address) bool {
+			return lo.FromPtr(ip.IsPrimaryIpv6)
+		})
+		Expect(hasIPv6Primary).To(BeTrue())
 	})
 })
