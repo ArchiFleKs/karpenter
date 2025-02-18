@@ -15,22 +15,19 @@ limitations under the License.
 package main
 
 import (
-	"github.com/samber/lo"
-
 	"github.com/aws/karpenter-provider-aws/pkg/cloudprovider"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers"
 	"github.com/aws/karpenter-provider-aws/pkg/operator"
-	"github.com/aws/karpenter-provider-aws/pkg/webhooks"
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	coreoperator "sigs.k8s.io/karpenter/pkg/operator"
-	corewebhooks "sigs.k8s.io/karpenter/pkg/webhooks"
 )
 
 func main() {
 	ctx, op := operator.NewOperator(coreoperator.NewOperator())
+
 	awsCloudProvider := cloudprovider.New(
 		op.InstanceTypesProvider,
 		op.InstanceProvider,
@@ -38,36 +35,40 @@ func main() {
 		op.GetClient(),
 		op.AMIProvider,
 		op.SecurityGroupProvider,
-		op.SubnetProvider,
 	)
-	lo.Must0(op.AddHealthzCheck("cloud-provider", awsCloudProvider.LivenessProbe))
 	cloudProvider := metrics.Decorate(awsCloudProvider)
+	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 
 	op.
 		WithControllers(ctx, corecontrollers.NewControllers(
+			ctx,
+			op.Manager,
 			op.Clock,
 			op.GetClient(),
-			op.KubernetesInterface,
-			state.NewCluster(op.Clock, op.GetClient(), cloudProvider),
 			op.EventRecorder,
 			cloudProvider,
+			clusterState,
 		)...).
-		WithWebhooks(ctx, corewebhooks.NewWebhooks()...).
 		WithControllers(ctx, controllers.NewControllers(
 			ctx,
-			op.Session,
+			op.Manager,
+			op.Config,
 			op.Clock,
+			op.EC2API,
 			op.GetClient(),
 			op.EventRecorder,
 			op.UnavailableOfferingsCache,
-			awsCloudProvider,
+			op.SSMCache,
+			cloudProvider,
 			op.SubnetProvider,
 			op.SecurityGroupProvider,
 			op.InstanceProfileProvider,
 			op.InstanceProvider,
 			op.PricingProvider,
 			op.AMIProvider,
+			op.LaunchTemplateProvider,
+			op.VersionProvider,
+			op.InstanceTypesProvider,
 		)...).
-		WithWebhooks(ctx, webhooks.NewWebhooks()...).
 		Start(ctx)
 }

@@ -11,13 +11,13 @@ jobs:
     outputs:
       PREEXISTING_CLUSTERS: ${{ steps.list_clusters.outputs.PREEXISTING_CLUSTERS }}
     steps:
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
     - name: configure aws credentials
-      uses: aws-actions/configure-aws-credentials@010d0da01d0b5a38af31e9c3470dbfdabdecca3a
+      uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722
       with:
-       role-to-assume: arn:aws:iam::${{ vars.ACCOUNT_ID }}:role/${{ vars.ROLE_NAME }}
+       role-to-assume: arn:aws:iam::${{ vars.CI_ACCOUNT_ID }}:role/${{ vars.CI_ROLE_NAME }}
        aws-region: eu-north-1
-    - uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+    - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
       with:
         go-version-file: test/hack/soak/go.mod
         cache-dependency-path: test/hack/soak/go.sum
@@ -47,5 +47,6 @@ jobs:
       workflow_trigger: "soak"
       cluster_name: ${{ matrix.cluster_name }}
       cleanup: ${{ matrix.cluster_cleanup }}
+      git_ref: ${{ matrix.git_ref }}
     secrets:
       SLACK_WEBHOOK_SOAK_URL: ${{ secrets.SLACK_WEBHOOK_SOAK_URL }}

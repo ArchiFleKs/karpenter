@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -33,6 +34,8 @@ import (
 
 const sweeperCleanedResourcesTableName = "sweeperCleanedResources"
 
+var excludedClusters = []string{}
+
 func main() {
 	expiration := flag.String("expiration", "12h", "define the expirationTTL of the resources")
 	clusterName := flag.String("cluster-name", "", "define cluster name to cleanup")
@@ -40,6 +43,7 @@ func main() {
 
 	ctx := context.Background()
 	cfg := lo.Must(config.LoadDefaultConfig(ctx))
+	cfg.RetryMaxAttempts = 10
 
 	logger := lo.Must(zap.NewProduction()).Sugar()
 
@@ -70,6 +74,7 @@ func main() {
 		resourcetypes.NewOIDC(iamClient),
 		resourcetypes.NewInstanceProfile(iamClient),
 		resourcetypes.NewStack(cloudFormationClient),
+		resourcetypes.NewVPCPeeringConnection(ec2Client),
 	}
 
 	for i := range resourceTypes {
@@ -78,26 +83,27 @@ func main() {
 		var err error
 		// If there's no cluster defined, clean up all expired resources. otherwise, only cleanup the resources associated with the cluster
 		if lo.FromPtr(clusterName) == "" {
-			ids, err = resourceTypes[i].GetExpired(ctx, expirationTime)
-		} else {
+			ids, err = resourceTypes[i].GetExpired(ctx, expirationTime, excludedClusters)
+		} else if !slices.Contains(excludedClusters, lo.FromPtr(clusterName)) {
 			ids, err = resourceTypes[i].Get(ctx, lo.FromPtr(clusterName))
 		}
 		if err != nil {
 			resourceLogger.Errorf("%v", err)
 		}
+		cleaned := []string{}
 		resourceLogger.With("ids", ids, "count", len(ids)).Infof("discovered resourceTypes")
 		if len(ids) > 0 {
-			cleaned, err := resourceTypes[i].Cleanup(ctx, ids)
+			cleaned, err = resourceTypes[i].Cleanup(ctx, ids)
 			if err != nil {
 				resourceLogger.Errorf("%v", err)
 			}
-			// Should only fire metrics if the resource have expired
-			if lo.FromPtr(clusterName) == "" {
-				if err = metricsClient.FireMetric(ctx, sweeperCleanedResourcesTableName, fmt.Sprintf("%sDeleted", resourceTypes[i].String()), float64(len(cleaned)), lo.Ternary(resourceTypes[i].Global(), "global", cfg.Region)); err != nil {
-					resourceLogger.Errorf("%v", err)
-				}
-			}
 			resourceLogger.With("ids", cleaned, "count", len(cleaned)).Infof("deleted resourceTypes")
+		}
+		// Should only fire metrics if the resource have expired
+		if lo.FromPtr(clusterName) == "" {
+			if err = metricsClient.FireMetric(ctx, sweeperCleanedResourcesTableName, fmt.Sprintf("%sDeleted", resourceTypes[i].String()), float64(len(cleaned)), lo.Ternary(resourceTypes[i].Global(), "global", cfg.Region)); err != nil {
+				resourceLogger.Errorf("%v", err)
+			}
 		}
 	}
 }

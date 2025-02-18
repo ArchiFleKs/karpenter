@@ -46,8 +46,8 @@ imaging:
   quality: 75
   anchor: smart
 params:
-  copyright: 'Amazon.com, Inc. or its affiliates.'
-  github_repo: 'https://github.com/aws/karpenter-provider-aws'
+  copyright: "Amazon.com, Inc. or its affiliates."
+  github_repo: "https://github.com/aws/karpenter-provider-aws"
   github_subdir: website
   github_branch: main
   images:
@@ -63,31 +63,34 @@ params:
     sidebar_search_disable: false
     navbar_logo: true
     footer_about_disable: true
+  snapshot_repo:
+    account_id: "021119463062"
+    region: us-east-1
   links:
     developer:
       - name: GitHub
-        url: 'https://github.com/aws/karpenter-provider-aws'
+        url: "https://github.com/aws/karpenter-provider-aws"
         icon: fab fa-github
         desc: Development takes place here!
       - name: Slack
-        url: 'https://slack.k8s.io/'
+        url: "https://slack.k8s.io/"
         icon: fab fa-slack
-        desc: 'Chat with us on Slack in the #aws-provider channel'
-  latest_release_version: v0.33.0
-  latest_k8s_version: 1.28
+        desc: "Chat with us on Slack in the #aws-provider channel"
+  latest_release_version: "1.2.1"
+  latest_k8s_version: "1.32"
   versions:
-    - v0.33
+    - v1.2
+    - v1.1
+    - v1.0
     - v0.32
-    - v0.31
-    - v0.30
     - preview
 menu:
   main:
     - name: GitHub
       weight: 99
-      url: 'https://github.com/aws/karpenter-provider-aws'
+      url: "https://github.com/aws/karpenter-provider-aws"
       pre: <i class='fab fa-github'></i>
     - name: Docs
       weight: 20
-      url: 'docs'
+      url: "docs"
       pre: <i class='fas fa-book'></i>

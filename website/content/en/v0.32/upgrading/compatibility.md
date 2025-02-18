@@ -6,18 +6,18 @@ description: >
   Compatibility issues for Karpenter
 ---
 
-# Compatibility 
+# Compatibility
 
 To make upgrading easier we aim to minimize the introduction of breaking changes.
 Before you begin upgrading Karpenter, consider Karpenter compatibility issues related to Kubernetes and the NodePool API (previously Provisioner).
 
-## Compatibility Matrix 
+## Compatibility Matrix
 
 [comment]: <> (the content below is generated from hack/docs/compataiblitymetrix_gen_docs.go)
 
-| KUBERNETES |  1.23   |  1.24   |  1.25   |  1.26   |  1.27   |  1.28   |
-|------------|---------|---------|---------|---------|---------|---------|
-| karpenter  | 0.21.x+ | 0.21.x+ | 0.25.x+ | 0.28.x+ | 0.28.x+ | 0.31.x+ |
+| KUBERNETES |   1.23   |   1.24   |   1.25   |   1.26   |   1.27   |   1.28   |    1.29    |
+|------------|----------|----------|----------|----------|----------|----------|------------|
+| karpenter  | \>= 0.21 | \>= 0.21 | \>= 0.25 | \>= 0.28 | \>= 0.28 | \>= 0.31 | \>= 0.34.0 |
 
 [comment]: <> (end docs generated content from hack/docs/compataiblitymetrix_gen_docs.go)
 
@@ -71,17 +71,26 @@ Karpenter offers three types of releases. This section explains the purpose of e
 
 ### Stable Releases
 
-Stable releases are the most reliable releases that are released with weekly cadence. Stable releases are our only recommended versions for production environments.
-Sometimes we skip a stable release because we find instability or problems that need to be fixed before having a stable release.
-Stable releases are tagged with Semantic Versioning. For example `v0.13.0`.
+Stable releases are the only recommended versions for production environments. Stable releases are tagged with a semantic version (e.g. `0.35.0`). Note that stable releases prior to `0.35.0` are prefixed with a `v` (e.g. `v0.34.0`).
 
 ### Release Candidates
 
-We consider having release candidates for major and important minor versions. Our release candidates are tagged like `vx.y.z-rc.0`, `vx.y.z-rc.1`. The release candidate will then graduate to `vx.y.z` as a normal stable release.
+We consider having release candidates for major and important minor versions. Our release candidates are tagged like `x.y.z-rc.0`, `x.y.z-rc.1`. The release candidate will then graduate to `x.y.z` as a stable release.
 By adopting this practice we allow our users who are early adopters to test out new releases before they are available to the wider community, thereby providing us with early feedback resulting in more stable releases.
+Note that, like the stable releases, release candidates prior to `0.35.0` are prefixed with a `v`.
 
 ### Snapshot Releases
 
-We release a snapshot release for every commit that gets merged into the main repository. This enables our users to immediately try a new feature or fix right after it's merged rather than waiting days or weeks for release.
-Snapshot releases are suitable for testing, and troubleshooting but users should exercise great care if they decide to use them in production environments.
-Snapshot releases are tagged with the git commit hash prefixed by the Karpenter major version. For example `v0-fc17bfc89ebb30a3b102a86012b3e3992ec08adf`. For more detailed examples on how to use snapshot releases look under "Usage" in [Karpenter Helm Chart](https://gallery.ecr.aws/karpenter/karpenter).
+We release a snapshot release for every commit that gets merged into [`aws/karpenter-provider-aws`](https://www.github.com/aws/karpenter-provider-aws). This enables users to immediately try a new feature or fix right after it's merged rather than waiting days or weeks for release.
+
+Snapshot releases are not made available in the same public ECR repository as other release types, they are instead published to a separate private ECR repository.
+Helm charts are published to `oci://{{< param "snapshot_repo.account_id" >}}.dkr.ecr.{{< param "snapshot_repo.region" >}}.amazonaws.com/karpenter/snapshot/karpenter` and are tagged with the git commit hash prefixed by the Karpenter major version (e.g. `v0-fc17bfc89ebb30a3b102a86012b3e3992ec08adf`).
+Anyone with an AWS account can pull from this repository, but must first authenticate:
+
+```bash
+aws ecr get-login-password --region {{< param "snapshot_repo.region" >}} | docker login --username AWS --password-stdin {{< param "snapshot_repo.account_id" >}}.dkr.ecr.{{< param "snapshot_repo.region" >}}.amazonaws.com
+```
+
+{{% alert title="Note" color="warning" %}}
+Snapshot releases are suitable for testing, and troubleshooting but they should not be used in production environments. Snapshot releases are ephemeral and will be removed 90 days after they were published.
+{{% /alert %}}

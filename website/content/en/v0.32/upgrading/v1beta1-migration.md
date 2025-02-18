@@ -38,7 +38,7 @@ This procedure assumes you are running the Karpenter controller on cluster and w
    ```
 
    {{% alert title="Warning" color="warning" %}}
-   v0.31.2 introduces minor changes to Karpenter so that rollback from v0.32.0 is supported. If you are coming from some other patch version of minor version v0.31.x, note that v0.31.2 and v0.31.3 are the _only_ patch versions that support rollback for v1beta1.
+   v0.31.2 introduces minor changes to Karpenter so that rollback from v0.32.0 is supported. If you are coming from some other patch version of minor version v0.31.x, note that __only__ versions v0.31.4+ support rollback for v1beta1.
    {{% /alert %}}
 
 2. Review for breaking changes: If you are already running Karpenter v0.31.x, you can skip this step. If you are running an earlier Karpenter version, you need to review the upgrade notes for each minor release.
@@ -47,7 +47,7 @@ This procedure assumes you are running the Karpenter controller on cluster and w
 
     ```bash
     export KARPENTER_NAMESPACE=karpenter
-    export KARPENTER_VERSION=v0.32.3
+    export KARPENTER_VERSION=v0.32.10
     export AWS_PARTITION="aws" # if you are not using standard partitions, you may need to configure to aws-cn / aws-us-gov
     export CLUSTER_NAME="${USER}-karpenter-demo"
     export AWS_REGION="us-west-2"
@@ -60,7 +60,7 @@ This procedure assumes you are running the Karpenter controller on cluster and w
 
     ```bash
     TEMPOUT=$(mktemp)
-    curl -fsSL https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/website/content/en/preview/upgrading/v1beta1-controller-policy.json > ${TEMPOUT}
+    curl -fsSL https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/website/content/en/preview/upgrading/v1beta1-controller-policy.json > ${TEMPOUT}
 
     AWS_REGION=${AWS_REGION:=$AWS_DEFAULT_REGION} # use the default region if AWS_REGION isn't defined
     POLICY_DOCUMENT=$(envsubst < ${TEMPOUT})
@@ -71,15 +71,15 @@ This procedure assumes you are running the Karpenter controller on cluster and w
     aws iam attach-role-policy --role-name "${ROLE_NAME}" --policy-arn "${POLICY_ARN}"
     ```
 
-5. Apply the v0.32.3 Custom Resource Definitions (CRDs):
+5. Apply the v0.32.10 Custom Resource Definitions (CRDs):
 
    ```bash
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.sh_provisioners.yaml
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.sh_machines.yaml
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.k8s.aws_awsnodetemplates.yaml
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.sh_nodepools.yaml
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.sh_nodeclaims.yaml
-    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.3/pkg/apis/crds/karpenter.k8s.aws_ec2nodeclasses.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.sh_provisioners.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.sh_machines.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.k8s.aws_awsnodetemplates.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.sh_nodepools.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.sh_nodeclaims.yaml
+    kubectl apply -f https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/pkg/apis/crds/karpenter.k8s.aws_ec2nodeclasses.yaml
     ```
 
 6. Upgrade Karpenter to the new version:
@@ -142,12 +142,12 @@ The [`karpenter-convert`](https://github.com/aws/karpenter/tree/release-v0.32.x/
 
 12. Roll over nodes: With the new NodePool yaml in hand, there are several ways you can begin to roll over your nodes to use the new NodePool:
 
-    1. Periodic Rolling with [Drift]({{< relref "../concepts/disruption#drift" >}}): Enable [drift]({{< relref "../reference/settings/#feature-gates" >}}) in Karpenter, then do the following:
+    1. Periodic Rolling with [Expiration]({{< relref "../concepts/disruption#automated-methods" >}}):
        - Add the following taint to the old Provisioner: `karpenter.sh/legacy=true:NoSchedule`
-       - Wait as Karpenter marks all machines owned by that Provisioner as having drifted.
+       - Set the Expiration in your Provisioner to a small value like `ttlSecondsUntilExpired: 300` to mark all nodes older than 5 minutes as expired. *Please note that in beta APIs, this is the same as `disruption.expireAfter`*
        - Watch as replacement nodes are launched from the new NodePool resource.
 
-       Because Karpenter will only roll of one node at a time, it may take some time for Karpenter to completely roll all nodes under a Provisioner.
+       Because Karpenter will only roll one node at a time, it may take some time for Karpenter to completely roll all nodes under a Provisioner.
 
     2. Forced Deletion: For each Provisioner in your cluster:
 
@@ -178,7 +178,7 @@ The [`karpenter-convert`](https://github.com/aws/karpenter/tree/release-v0.32.x/
 16. Remove the alpha instance profile(s). If you were just using the InstanceProfile deployed through the [Getting Started Guide]({{< ref "../getting-started/getting-started-with-karpenter" >}}), delete the `KarpenterNodeInstanceProfile` section from the CloudFormation. Alternatively, if you want to remove the instance profile manually, you can run the following command
 
     ```bash
-    ROLE_NAME="KarpenterNodeRole-${ClusterName}"
+    ROLE_NAME="KarpenterNodeRole-${CLUSTER_NAME}"
     INSTANCE_PROFILE_NAME="KarpenterNodeInstanceProfile-${CLUSTER_NAME}"
     aws iam remove-role-from-instance-profile --instance-profile-name "${INSTANCE_PROFILE_NAME}" --role-name "${ROLE_NAME}"
     aws iam delete-instance-profile --instance-profile-name "${INSTANCE_PROFILE_NAME}"
@@ -189,7 +189,7 @@ The [`karpenter-convert`](https://github.com/aws/karpenter/tree/release-v0.32.x/
     ```bash
     ROLE_NAME="${CLUSTER_NAME}-karpenter"
     POLICY_NAME="KarpenterControllerPolicy-${CLUSTER_NAME}"
-    POLICY_ARN=$(aws iam list-policies --query 'Policies[?PolicyName==`KarpenterControllerPolicy-scale-test`].Arn' --output text)
+    POLICY_ARN=$(aws iam list-policies --query "Policies[?PolicyName=='${POLICY_NAME}'].Arn" --output text)
     aws iam detach-role-policy --role-name "${ROLE_NAME}" --policy-arn "${POLICY_ARN}"
     ```
 
@@ -321,6 +321,8 @@ apiVersion: karpenter.sh/v1beta1
 kind: NodePool
 ...
 nodeClassRef:
+  apiVersion: karpenter.k8s.aws/v1beta1
+  kind: EC2NodeClass
   name: default
 ```
 
@@ -701,9 +703,9 @@ kind: EC2NodeClass
 spec:
   amiSelectorTerms:
   - name: my-name1
-    owner: 123456789
+    owner: "123456789"
   - name: my-name2
-    owner: 123456789
+    owner: "123456789"
   - name: my-name1
     owner: amazon
   - name: my-name2
@@ -751,6 +753,34 @@ Karpenter v1beta1 introduces changes to some common labels, annotations, and sta
 | MachineEmpty                    | Empty          |
 | MachineExpired                  | Expired        |
 | MachineDrifted                  | Drifted        |
+
+### IAM Controller Permissions
+
+v1beta1 introduces changes to the IAM permissions assigned to the Karpenter controller policy used when deploying Karpenter to your cluster with [IRSA](https://docs.aws.amazon.com/emr/latest/EMR-on-EKS-DevelopmentGuide/setting-up-enable-IAM.html) or [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html).
+
+You can see a full example of the v1beta1 required controller permissions by viewing the [v1beta1 Controller Policy](https://raw.githubusercontent.com/aws/karpenter-provider-aws/v0.32.10/website/content/en/preview/upgrading/v1beta1-controller-policy.json).
+
+Additionally, read more detail about the full set of permissions assigned to the Karpenter controller policy in the [CloudFormation Reference Guide]({{< ref "../reference/cloudformation" >}}).
+
+#### Updating Tag-Based Permissions
+
+Since Karpenter v1beta1 introduces changes to custom resource, label, and annotation naming, this also changes the tag keys that Karpenter uses to tag instances, volumes launch templates, and any other resources that Karpenter deploys and manages.
+
+By default, when using the [Karpenter Getting Started Guide]({{< ref "../getting-started/getting-started-with-karpenter" >}}) to setup Karpenter on your cluster, you will deploy an IAM policy that scopes Karpenter's permissions based on tag keys and values using [ABAC](https://aws.amazon.com/identity/attribute-based-access-control/). Any part of the Karpenter alpha controller policy which previously referenced `aws:RequestTag:karpenter.sh/provisioner-name`  or `aws:ResourceTag:karpenter.sh/provisioner-name` is now updated in v1beta1 to be `aws:RequestTag:karpenter.sh/nodepool` and `aws:ResourceTag:karpenter.sh/nodepool`.
+
+{{% alert title="Note" color="warning" %}}
+While migrating between alpha and beta, you will need to maintain the old tag permissions as well as the new permissions. You can remove the old tag key permissions from the controller policy when you have fully migrated to beta resources. This process for maintaining both sets of permissions while migrating is also mentioned in greater detail in the [Upgrade Procedure]({{< ref "#upgrade-procedure" >}}) shown above.
+{{% /alert %}}
+
+#### Updating IAM Instance Profile Permissions
+
+Additionally, starting in v1beta1, Karpenter removes the need for you to manage your own instance profiles used to launch EC2 instances, allowing you to only specify the role that you want assigned to your instances in the `spec.role` of the `EC2NodeClass`. When you do this, Karpenter will generate and manage an instance profile on your behalf.
+
+To enable this functionality, you need to add `iam:` permissions that give Karpenter permission to generate and managed instance profiles. These permissions include `iam:CreateInstanceProfile`, `iam:TagInstanceProfile`, `iam:AddRoleToInstanceProfile`, `iam:RemoveRoleFromInstanceProfile`, `iam:DeleteInstanceProfile`, and `iam:GetInstanceProfile`. Each of these permissions is scoped down to only operate on instance profiles generated from a single Karpenter instance on a single Karpenter cluster using [ABAC](https://aws.amazon.com/identity/attribute-based-access-control/).
+
+{{% alert title="Note" color="warning" %}}
+These `iam:` permissions are not required if you do not intend to use the `spec.role` field to enable the managed instance profile feature. Instead, you can use the `spec.instanceProfile` field to tell Karpenter to use an unmanaged instance profile explicitly. Note that this means that you have to manually provision and manage the instance profile yourself as you did in alpha.
+{{% /alert %}}
 
 ### Metrics
 

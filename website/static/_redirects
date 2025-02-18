@@ -1,21 +1,3 @@
-# Redirects from what the browser requests to what we serve
-/v0.28.0/*                      /v0.28/:splat
-/v0.27.5/*                      /v0.27/:splat
-/v0.26.1/*                      /v0.26/:splat
-/v0.26/getting-started/getting-started-with-karpenter/*  /v0.26/getting-started/getting-started-with-eksctl/:splat
-/v0.27/getting-started/getting-started-with-eksctl/* /v0.27/getting-started/getting-started-with-karpenter/:splat
-/v0.28/getting-started/getting-started-with-eksctl/* /v0.28/getting-started/getting-started-with-karpenter/:splat
-
-# Redirect all preview documentation to the new routes
-/preview/concepts/provisioners /preview/concepts/nodepools
-/preview/concepts/node-templates /preview/concepts/nodeclasses
-/preview/concepts/deprovisioning /preview/concepts/disruption
-/preview/upgrade-guide /preview/upgrading/upgrade-guide
-/preview/concepts/instance-types /preview/reference/instance-types
-/preview/concepts/metrics /preview/reference/metrics
-/preview/concepts/settings /preview/reference/settings
-/preview/concepts/threat-model /preview/reference/threat-model
-
 # Redirect all v0.32 documentation to the new routes
 /v0.32/concepts/provisioners /v0.32/concepts/nodepools
 /v0.32/concepts/node-templates /v0.32/concepts/nodeclasses
@@ -26,12 +8,19 @@
 /v0.32/concepts/settings /v0.32/reference/settings
 /v0.32/concepts/threat-model /v0.32/reference/threat-model
 
-# Redirect all docs documentation to the new routes
-/docs/concepts/provisioners /docs/concepts/nodepools
-/docs/concepts/node-templates /docs/concepts/nodeclasses
-/docs/concepts/deprovisioning /docs/concepts/disruption
-/docs/upgrade-guide /docs/upgrading/upgrade-guide
-/docs/concepts/instance-types /docs/reference/instance-types
-/docs/concepts/metrics /docs/reference/metrics
-/docs/concepts/settings /docs/reference/settings
-/docs/concepts/threat-model /docs/reference/threat-model
+# Redirect any v1beta1-migration reference to the v0.32 version
+/*/upgrading/v1beta1-migration /v0.32/upgrading/v1beta1-migration
+
+# Redirect old "Managing AMIs" Task path
+/preview/tasks/amitasks /preview/tasks/managing-amis
+/docs/tasks/amitasks /docs/tasks/managing-amis
+/v0.34/tasks/amitasks /v0.34/tasks/managing-amis
+/v0.35/tasks/amitasks /v0.35/tasks/managing-amis
+
+# Redirect old working group page to the new community meetings page
+/preview/contributing/working-group /preview/contributing/community-meetings
+/docs/contributing/working-group /docs/contributing/community-meetings
+/v0.32/contributing/working-group /v0.32/contributing/community-meetings
+/v1.0/contributing/working-group /v1.0/contributing/community-meetings
+/v1.1/contributing/working-group /v1.1/contributing/community-meetings
+/v1.2/contributing/working-group /v1.2/contributing/community-meetings

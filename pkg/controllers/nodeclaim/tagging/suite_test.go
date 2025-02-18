@@ -19,37 +19,38 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/samber/lo"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/karpenter/pkg/events"
+	"sigs.k8s.io/karpenter/pkg/test/v1alpha1"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/samber/lo"
+	corev1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	coretest "sigs.k8s.io/karpenter/pkg/test"
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
-	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
+	v1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
+	"github.com/aws/karpenter-provider-aws/pkg/cloudprovider"
 	"github.com/aws/karpenter-provider-aws/pkg/controllers/nodeclaim/tagging"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instance"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 
-	"sigs.k8s.io/karpenter/pkg/operator/controller"
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
-	"sigs.k8s.io/karpenter/pkg/operator/scheme"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "knative.dev/pkg/logging/testing"
 	. "sigs.k8s.io/karpenter/pkg/test/expectations"
+	. "sigs.k8s.io/karpenter/pkg/utils/testing"
 )
 
 var ctx context.Context
 var awsEnv *test.Environment
 var env *coretest.Environment
-var taggingController controller.Controller
+var taggingController *tagging.Controller
 
 func TestAPIs(t *testing.T) {
 	ctx = TestContextWithLogger(t)
@@ -58,11 +59,13 @@ func TestAPIs(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	env = coretest.NewEnvironment(scheme.Scheme, coretest.WithCRDs(apis.CRDs...))
+	env = coretest.NewEnvironment(coretest.WithCRDs(apis.CRDs...), coretest.WithCRDs(v1alpha1.CRDs...))
 	ctx = coreoptions.ToContext(ctx, coretest.Options())
 	ctx = options.ToContext(ctx, test.Options())
 	awsEnv = test.NewEnvironment(ctx, env)
-	taggingController = tagging.NewController(env.Client, awsEnv.InstanceProvider)
+	cloudProvider := cloudprovider.New(awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}),
+		env.Client, awsEnv.AMIProvider, awsEnv.SecurityGroupProvider)
+	taggingController = tagging.NewController(env.Client, cloudProvider, awsEnv.InstanceProvider)
 })
 var _ = AfterSuite(func() {
 	Expect(env.Stop()).To(Succeed(), "Failed to stop environment")
@@ -77,72 +80,72 @@ var _ = AfterEach(func() {
 })
 
 var _ = Describe("TaggingController", func() {
-	var ec2Instance *ec2.Instance
+	var ec2Instance ec2types.Instance
 
 	BeforeEach(func() {
-		ec2Instance = &ec2.Instance{
-			State: &ec2.InstanceState{
-				Name: aws.String(ec2.InstanceStateNameRunning),
+		ec2Instance = ec2types.Instance{
+			State: &ec2types.InstanceState{
+				Name: ec2types.InstanceStateNameRunning,
 			},
-			Tags: []*ec2.Tag{
+			Tags: []ec2types.Tag{
 				{
 					Key:   aws.String(fmt.Sprintf("kubernetes.io/cluster/%s", options.FromContext(ctx).ClusterName)),
 					Value: aws.String("owned"),
 				},
 				{
-					Key:   aws.String(corev1beta1.NodePoolLabelKey),
+					Key:   aws.String(karpv1.NodePoolLabelKey),
 					Value: aws.String("default"),
 				},
 				{
-					Key:   aws.String(corev1beta1.ManagedByAnnotationKey),
+					Key:   aws.String(v1.EKSClusterNameTagKey),
 					Value: aws.String(options.FromContext(ctx).ClusterName),
 				},
 			},
 			PrivateDnsName: aws.String(fake.PrivateDNSName()),
-			Placement: &ec2.Placement{
+			Placement: &ec2types.Placement{
 				AvailabilityZone: aws.String(fake.DefaultRegion),
 			},
 			InstanceId:   aws.String(fake.InstanceID()),
-			InstanceType: aws.String("m5.large"),
+			InstanceType: "m5.large",
 		}
 
-		awsEnv.EC2API.Instances.Store(*ec2Instance.InstanceId, ec2Instance)
+		awsEnv.EC2API.Instances.Store(aws.ToString(ec2Instance.InstanceId), ec2Instance)
 	})
 
 	It("shouldn't tag instances without a Node", func() {
-		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-			Status: corev1beta1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+			Status: karpv1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 			},
 		})
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
-		ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
-		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == tagging.TagName
+		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag ec2types.Tag) bool {
+			return *tag.Key == v1.NameTagKey
 		})).To(BeFalse())
 	})
 
 	It("shouldn't tag nodeclaim with a malformed provderID", func() {
-		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-			Status: corev1beta1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+			Status: karpv1.NodeClaimStatus{
 				ProviderID: "Bad providerID",
 				NodeName:   "default",
 			},
 		})
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
-		ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
-		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == tagging.TagName
+		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag ec2types.Tag) bool {
+			return tag.Key == &v1.NameTagKey
 		})).To(BeFalse())
 	})
 
 	It("should gracefully handle missing NodeClaim", func() {
-		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-			Status: corev1beta1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+			Status: karpv1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
@@ -150,12 +153,12 @@ var _ = Describe("TaggingController", func() {
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		ExpectDeleted(ctx, env.Client, nodeClaim)
-		ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
+		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
 	})
 
 	It("should gracefully handle missing instance", func() {
-		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-			Status: corev1beta1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+			Status: karpv1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
@@ -163,58 +166,61 @@ var _ = Describe("TaggingController", func() {
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		awsEnv.EC2API.Instances.Delete(*ec2Instance.InstanceId)
-		ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
+		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
 	})
 
 	It("shouldn't tag nodeclaim with deletion timestamp set", func() {
-		nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-			Status: corev1beta1.NodeClaimStatus{
+		nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+			Status: karpv1.NodeClaimStatus{
 				ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 				NodeName:   "default",
 			},
-			ObjectMeta: v1.ObjectMeta{
+			ObjectMeta: corev1.ObjectMeta{
 				Finalizers: []string{"testing/finalizer"},
 			},
 		})
 
 		ExpectApplied(ctx, env.Client, nodeClaim)
 		Expect(env.Client.Delete(ctx, nodeClaim)).To(Succeed())
-		ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
-		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1beta1.AnnotationInstanceTagged)))
-		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag *ec2.Tag) bool {
-			return *tag.Key == tagging.TagName
+		ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
+		Expect(nodeClaim.Annotations).To(Not(HaveKey(v1.AnnotationInstanceTagged)))
+		Expect(lo.ContainsBy(ec2Instance.Tags, func(tag ec2types.Tag) bool {
+			return tag.Key == &v1.NameTagKey
 		})).To(BeFalse())
 	})
 
 	DescribeTable(
 		"should tag taggable instances",
 		func(customTags ...string) {
-			nodeClaim := coretest.NodeClaim(corev1beta1.NodeClaim{
-				Status: corev1beta1.NodeClaimStatus{
+			nodeClaim := coretest.NodeClaim(karpv1.NodeClaim{
+				Status: karpv1.NodeClaimStatus{
 					ProviderID: fake.ProviderID(*ec2Instance.InstanceId),
 					NodeName:   "default",
 				},
 			})
 
 			for _, tag := range customTags {
-				ec2Instance.Tags = append(ec2Instance.Tags, &ec2.Tag{
+				ec2Instance.Tags = append(ec2Instance.Tags, ec2types.Tag{
 					Key:   aws.String(tag),
 					Value: aws.String("custom-tag"),
 				})
 			}
-			awsEnv.EC2API.Instances.Store(*ec2Instance.InstanceId, ec2Instance)
+			awsEnv.EC2API.Instances.Store(aws.ToString(ec2Instance.InstanceId), ec2Instance)
 
 			ExpectApplied(ctx, env.Client, nodeClaim)
-			ExpectReconcileSucceeded(ctx, taggingController, client.ObjectKeyFromObject(nodeClaim))
+			ExpectObjectReconciled(ctx, env.Client, taggingController, nodeClaim)
 			nodeClaim = ExpectExists(ctx, env.Client, nodeClaim)
-			Expect(nodeClaim.Annotations).To(HaveKey(v1beta1.AnnotationInstanceTagged))
+			Expect(nodeClaim.Annotations).To(HaveKey(v1.AnnotationInstanceTagged))
 
 			expectedTags := map[string]string{
-				tagging.TagName:      nodeClaim.Status.NodeName,
-				tagging.TagNodeClaim: nodeClaim.Name,
+				v1.NameTagKey:           nodeClaim.Status.NodeName,
+				v1.NodeClaimTagKey:      nodeClaim.Name,
+				v1.EKSClusterNameTagKey: options.FromContext(ctx).ClusterName,
 			}
+			ec2Instance := lo.Must(awsEnv.EC2API.Instances.Load(*ec2Instance.InstanceId)).(ec2types.Instance)
 			instanceTags := instance.NewInstance(ec2Instance).Tags
+
 			for tag, value := range expectedTags {
 				if lo.Contains(customTags, tag) {
 					value = "custom-tag"
@@ -222,9 +228,12 @@ var _ = Describe("TaggingController", func() {
 				Expect(instanceTags).To(HaveKeyWithValue(tag, value))
 			}
 		},
-		Entry("with only karpenter.k8s.aws/nodeclaim tag", tagging.TagName),
-		Entry("with only Name tag", tagging.TagNodeClaim),
-		Entry("with both Name and karpenter.k8s.aws/nodeclaim tags"),
-		Entry("with nothing to tag", tagging.TagName, tagging.TagNodeClaim),
+		Entry("with the karpenter.sh/nodeclaim tag", v1.NameTagKey, v1.EKSClusterNameTagKey),
+		Entry("with the eks:eks-cluster-name tag", v1.NameTagKey, v1.NodeClaimTagKey),
+		Entry("with the Name tag", v1.NodeClaimTagKey, v1.EKSClusterNameTagKey),
+		Entry("with the karpenter.sh/nodeclaim and eks:eks-cluster-name tags", v1.NameTagKey),
+		Entry("with the Name and eks:eks-cluster-name tags", v1.NodeClaimTagKey),
+		Entry("with the karpenter.sh/nodeclaim and Name tags", v1.EKSClusterNameTagKey),
+		Entry("with nothing to tag", v1.NodeClaimTagKey, v1.EKSClusterNameTagKey, v1.NameTagKey),
 	)
 })

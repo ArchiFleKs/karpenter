@@ -27,10 +27,10 @@ inputs:
     required: true
   k8s_version:
     description: 'Version of Kubernetes to use for the launched cluster'
-    default: "1.28"
+    default: "1.32"
   eksctl_version:
     description: "Version of eksctl to install"
-    default: v0.165.0
+    default: v0.202.0
   ip_family:
     description: "IP Family of the cluster. Valid values are IPv4 or IPv6"
     default: "IPv4"
@@ -39,11 +39,18 @@ inputs:
     default: 'false'
   git_ref:
     description: "The git commit, tag, or branch to check out. Requires a corresponding Karpenter snapshot release"
-    required: false
+  enable_local_zones:
+    description: "Whether to include local zones in the VPC created for the cluster."
+    default: 'false'
+  cleanup:
+    description: "Whether to cleanup resources on failure"
+    default: 'false'
+  codebuild_role:
+    description: "Codebuild Role that must be given an access entry in case of private cluster"
 runs:
   using: "composite"
   steps:
-  - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+  - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     with:
       ref: ${{ inputs.git_ref }}
   - uses: ./.github/actions/e2e/install-eksctl
@@ -57,9 +64,6 @@ runs:
     run: |
       # Resolve the cloudformation path with fallback
       CLOUDFORMATION_PATH=website/content/en/preview/getting-started/getting-started-with-karpenter/cloudformation.yaml
-      if [ ! -f $CLOUDFORMATION_PATH ]; then
-        CLOUDFORMATION_PATH=website/content/en/preview/getting-started/getting-started-with-eksctl/cloudformation.yaml
-      fi
 
       # Update the Cloudformation policy to add the permissionBoundary to the NodeRole
       yq -i ".Resources.KarpenterNodeRole.Properties.PermissionsBoundary = \"arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary\"" $CLOUDFORMATION_PATH
@@ -80,7 +84,42 @@ runs:
       K8S_VERSION: ${{ inputs.k8s_version }}
       IP_FAMILY: ${{ inputs.ip_family }}
       PRIVATE_CLUSTER: ${{ inputs.private_cluster }}
+      GIT_REF:  ${{ inputs.git_ref }}
+      ENABLE_LOCAL_ZONES: ${{ inputs.enable_local_zones }}
+      CLEANUP: ${{ inputs.cleanup }}
+      CODEBUILD_ROLE: ${{ inputs.codebuild_role }}
     run: |
+      if [[ "$GIT_REF" == '' ]]; then
+        GIT_REF=$(git rev-parse HEAD)
+      fi
+
+      # Disable Pod Identity for Private Clusters
+      # https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html#pod-id-considerations
+      if [[ "$PRIVATE_CLUSTER" == 'true' ]]; then
+        KARPENTER_IAM="""
+          - metadata:
+              name: karpenter
+              namespace: kube-system
+            attachPolicyARNs:
+              - "arn:aws:iam::${{ inputs.account_id }}:policy/KarpenterControllerPolicy-${{ inputs.cluster_name }}"
+            permissionsBoundary: "arn:aws:iam::${{ inputs.account_id }}:policy/GithubActionsPermissionsBoundary"
+            roleName: karpenter-irsa-${{ inputs.cluster_name }}
+            roleOnly: true"""
+      else
+        KARPENTER_IAM="""podIdentityAssociations:
+          - namespace: kube-system
+            serviceAccountName: karpenter
+            roleName: karpenter-irsa-${{ inputs.cluster_name }}
+            permissionsBoundaryARN: "arn:aws:iam::${{ inputs.account_id }}:policy/GithubActionsPermissionsBoundary"
+            permissionPolicyARNs:
+              - "arn:aws:iam::${{ inputs.account_id }}:policy/KarpenterControllerPolicy-${{ inputs.cluster_name }}""""
+        POD_IDENTITY="""- name: eks-pod-identity-agent
+        permissionsBoundary: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
+        configurationValues: |
+          tolerations:
+            - operator: Exists"""
+      fi
+
       # Create or Upgrade the cluster based on whether the cluster already exists
       cmd="create"
       eksctl get cluster --name "$CLUSTER_NAME" && cmd="upgrade"
@@ -98,6 +137,7 @@ runs:
           github.com/run-url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           testing/type: "e2e"
           testing/cluster: "$CLUSTER_NAME"
+          test/git_ref: "$GIT_REF"
       kubernetesNetworkConfig:
         ipFamily: "$IP_FAMILY"
       managedNodeGroups:
@@ -120,13 +160,6 @@ runs:
           logRetentionInDays: 30
       iam:
         serviceRolePermissionsBoundary: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
-        podIdentityAssociations:
-          - namespace: kube-system
-            serviceAccountName: karpenter
-            roleName: "karpenter-irsa-$CLUSTER_NAME"
-            permissionsBoundaryARN: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
-            permissionPolicyARNs: 
-              - "arn:aws:iam::$ACCOUNT_ID:policy/KarpenterControllerPolicy-$CLUSTER_NAME"
         serviceAccounts:
           - metadata:
               name: prometheus-kube-prometheus-prometheus
@@ -136,6 +169,7 @@ runs:
             permissionsBoundary: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
             roleName: "prometheus-irsa-$CLUSTER_NAME"
             roleOnly: true
+        $KARPENTER_IAM
         withOIDC: true
       addons:
       - name: vpc-cni
@@ -148,37 +182,31 @@ runs:
         permissionsBoundary: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
         wellKnownPolicies:
           ebsCSIController: true
-      - name: eks-pod-identity-agent
-        permissionsBoundary: "arn:aws:iam::$ACCOUNT_ID:policy/GithubActionsPermissionsBoundary"
-        configurationValues: |
-          tolerations:
-            - operator: Exists
+      $POD_IDENTITY
       EOF
+
+      if [[ $ENABLE_LOCAL_ZONES == "true" ]]; then
+        local_zones=$(AWS_REGION=$REGION aws ec2 describe-availability-zones | yq '.AvailabilityZones | filter(.ZoneType == "local-zone") | [.[].ZoneName] | join(" ")')
+        for zone in $local_zones; do
+          yq -i ".localZones += [\"$zone\"]" clusterconfig.yaml
+        done
+      fi
 
       if [[ $PRIVATE_CLUSTER == 'true' ]]; then
         yq -i '.privateCluster.enabled=true' clusterconfig.yaml
         yq -i '.managedNodeGroups[0].privateNetworking=true' clusterconfig.yaml
+        yq -i '.accessConfig.authenticationMode="API_AND_CONFIG_MAP"' clusterconfig.yaml
+        CODEBUILD_ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$CODEBUILD_ROLE"
+        yq -i ".accessConfig.accessEntries[0].principalARN=\"$CODEBUILD_ROLE_ARN\"" clusterconfig.yaml
+        yq -i '.accessConfig.accessEntries[0].accessPolicies[0].policyARN="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"' clusterconfig.yaml
+        yq -i '.accessConfig.accessEntries[0].accessPolicies[0].accessScope.type="cluster"' clusterconfig.yaml
       fi
 
-      eksctl ${cmd} cluster -f clusterconfig.yaml
-
-      # Add the SQS and SSM VPC endpoints if we are creating a private cluster
-      # We need to grab all of the VPC details for the cluster in order to add the endpoint
-      if [[ $PRIVATE_CLUSTER == 'true' ]]; then
-        VPC_CONFIG=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query "cluster.resourcesVpcConfig")
-        VPC_ID=$(echo $VPC_CONFIG | jq .vpcId -r)
-        SUBNET_IDS=($(echo $VPC_CONFIG | jq '.subnetIds | join(" ")' -r))
-        SECURITY_GROUP_IDS=($(echo $VPC_CONFIG | jq '.securityGroupIds | join(" ")' -r))
-
-        for SERVICE in "com.amazonaws.$REGION.ssm" "com.amazonaws.$REGION.sqs"; do
-          aws ec2 create-vpc-endpoint \
-            --vpc-id "${VPC_ID}" \
-            --vpc-endpoint-type Interface \
-            --service-name "${SERVICE}" \
-            --subnet-ids ${SUBNET_IDS[@]} \
-            --security-group-ids ${SECURITY_GROUP_IDS[@]} \
-            --tags "testing/type=e2e" "testing/cluster=$CLUSTER_NAME" "github.com/run-url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" "karpenter.sh/discovery=$CLUSTER_NAME"
-        done
+      # Disable rollback of the CloudFormation on Create if we aren't cleaning up the run
+      if [[ $CLEANUP == 'false' ]] && [[ $cmd == 'create' ]]; then
+        eksctl ${cmd} cluster -f clusterconfig.yaml --cfn-disable-rollback
+      else
+        eksctl ${cmd} cluster -f clusterconfig.yaml
       fi
   - name: tag oidc provider of the cluster
     if: always()
@@ -186,24 +214,23 @@ runs:
     env:
       ACCOUNT_ID: ${{ inputs.account_id }}
       CLUSTER_NAME: ${{ inputs.cluster_name }}
+      GIT_REF: ${{ inputs.git_ref }}
     run: |
+      if [[ "$GIT_REF" == '' ]]; then
+        GIT_REF=$(git rev-parse HEAD)
+      fi
       oidc_id=$(aws eks describe-cluster --name "$CLUSTER_NAME" --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 3,4,5)
       arn="arn:aws:iam::$ACCOUNT_ID:oidc-provider/${oidc_id}"
       aws iam tag-open-id-connect-provider --open-id-connect-provider-arn $arn \
-         --tags Key=testing/type,Value=e2e Key=testing/cluster,Value=$CLUSTER_NAME Key=github.com/run-url,Value=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+         --tags Key=test/git_ref,Value=$GIT_REF Key=testing/type,Value=e2e Key=testing/cluster,Value=$CLUSTER_NAME Key=github.com/run-url,Value=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
   - name: give KarpenterNodeRole permission to bootstrap
+    if: ${{ inputs.private_cluster == 'false' }}
     shell: bash
     env:
       ACCOUNT_ID: ${{ inputs.account_id }}
       CLUSTER_NAME: ${{ inputs.cluster_name }}
     run: |
-      eksctl create iamidentitymapping \
-      --username system:node:{{EC2PrivateDNSName}} \
-      --cluster "$CLUSTER_NAME" \
-      --arn "arn:aws:iam::$ACCOUNT_ID:role/KarpenterNodeRole-$CLUSTER_NAME" \
-      --group system:bootstrappers \
-      --group system:nodes \
-      --group eks:kube-proxy-windows
+      ./test/hack/e2e_scripts/noderole_bootstrap_permission.sh
   - name: cloudformation describe stack events
     shell: bash
     if: failure()
@@ -216,15 +243,18 @@ runs:
         aws cloudformation describe-stack-events --stack-name $stack_name
       done
   - name: install prometheus
+    if: ${{ inputs.private_cluster == 'false' }}
     uses: ./.github/actions/e2e/install-prometheus
     with:
       account_id: ${{ inputs.account_id }}
       role: ${{ inputs.role }}
-      region: ${{ inputs.prometheus_region }}
+      prometheus_region: ${{ inputs.prometheus_region }}
+      region: ${{ inputs.region }}
       cluster_name: ${{ inputs.cluster_name }}
       workspace_id: ${{ inputs.prometheus_workspace_id }}
       git_ref: ${{ inputs.git_ref }}
   - name: install karpenter
+    if: ${{ inputs.private_cluster == 'false' }}
     uses: ./.github/actions/e2e/install-karpenter
     with:
       account_id: ${{ inputs.account_id  }}
@@ -235,3 +265,4 @@ runs:
       cluster_name: ${{ inputs.cluster_name }}
       k8s_version: ${{ inputs.k8s_version }}
       git_ref: ${{ inputs.git_ref }}
+      private_cluster: ${{ inputs.private_cluster }}
